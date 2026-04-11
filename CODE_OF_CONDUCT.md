@@ -18,4 +18,4 @@ We are committed to making participation in this project a respectful and harass
 
 ## Enforcement
 
-Violations may result in removal of comments, issues, or blocking from the repository. Reports can be sent to **security@griffin31.com**.
+Violations may result in removal of comments, issues, or blocking from the repository. Reports can be sent to **security@griffin31.ai**.

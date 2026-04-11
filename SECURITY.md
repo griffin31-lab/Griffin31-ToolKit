@@ -6,7 +6,7 @@ If you discover a security issue in any Griffin31 ToolKit script, please report 
 
 **Do not open a public GitHub issue for security vulnerabilities.**
 
-Instead, email us at: **security@griffin31.com**
+Instead, email us at: **security@griffin31.ai**
 
 We will acknowledge your report within 48 hours and work with you to resolve the issue.
 
