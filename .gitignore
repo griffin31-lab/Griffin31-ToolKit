@@ -1,0 +1,37 @@
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Secrets & credentials — never commit these
+*.pem
+*.pfx
+*.key
+*.env
+.env*
+credentials.*
+secret.*
+token.*
+
+# PowerShell artifacts
+*.log
+*.csv
+*.xlsx
+*.json
+!**/*config*.json
+
+# Output / report folders
+output/
+reports/
+exports/
+
+# macOS
+.AppleDouble
+.LSOverride
