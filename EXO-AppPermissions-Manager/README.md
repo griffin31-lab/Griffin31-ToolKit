@@ -14,6 +14,12 @@ This tool automates all of it in one script.
 - ExchangeOnlineManagement module
 - Exchange Online Administrator or Global Administrator role
 
+## Before you start
+
+Update the placeholder values in `CONFIG.ps1` with your environment details:
+- `$AppId` — your Azure AD App Registration ID
+- `$TargetMailbox` — the mailbox you want to scope access to
+
 ## How it works
 
 The script performs 4 steps:
