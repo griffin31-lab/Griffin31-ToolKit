@@ -516,8 +516,8 @@ function Set-Font($cells, [string]$name = "Arial", [int]$size = 10, [bool]$bold 
 }
 
 # ── Helper: thin border on all sides ──
-function Set-ThinBorder($cells, [System.Drawing.Color]$color = $null) {
-  if (-not $color) { $color = $MED_GRAY }
+function Set-ThinBorder($cells, $color = $null) {
+  if ($null -eq $color) { $color = [System.Drawing.Color]::FromArgb(217, 217, 217) }
   $b = $cells.Style.Border
   $b.Top.Style    = [OfficeOpenXml.Style.ExcelBorderStyle]::Thin
   $b.Bottom.Style = [OfficeOpenXml.Style.ExcelBorderStyle]::Thin
