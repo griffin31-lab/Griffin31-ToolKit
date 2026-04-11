@@ -9,6 +9,7 @@ Desktop.ini
 *.swp
 *.swo
 *~
+*.code-workspace
 
 # Secrets & credentials — never commit these
 *.pem

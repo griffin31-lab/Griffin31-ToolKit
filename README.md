@@ -8,4 +8,6 @@ These tools complement the [Griffin31](https://griffin31.com) SaaS platform for 
 
 | Tool | Description |
 |------|-------------|
-| [CA-Update-AffectedApps](CA-Update-AffectedApps/) | Identifies tenant apps affected by Microsoft's upcoming Conditional Access enforcement change (May 2026). Scans for apps using only basic OIDC/directory scopes that will face new CA policy enforcement. |
+| [CA-Update-AffectedApps](CA-Update-AffectedApps/) | Identifies tenant apps affected by Microsoft's upcoming Conditional Access enforcement change (May 2026). |
+| [EXO-AppPermissions-Manager](EXO-AppPermissions-Manager/) | Automates Exchange Online app-to-mailbox permission scoping — roles, management scopes, and verification. |
+| [SPF-Lookup-Validator](SPF-Lookup-Validator/) | Recursively analyzes SPF records, counts DNS lookups, and validates RFC 7208 compliance. |

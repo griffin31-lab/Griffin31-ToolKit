@@ -1,0 +1,21 @@
+# Temporary files
+*.tmp
+*.swp
+*~
+
+# System files
+.DS_Store
+
+# Editor directories and files
+.idea/
+.vscode/
+*.code-workspace
+
+# Logs and databases
+*.log
+*.sql
+*.sqlite
+
+# Local development files
+.env
+.env.local

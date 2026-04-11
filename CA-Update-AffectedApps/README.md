@@ -13,9 +13,39 @@ This tool scans your tenant and identifies those affected apps so you can prepar
 ## Requirements
 
 - PowerShell 7.x (Windows or macOS)
-- Microsoft.Graph PowerShell module (auto-installs if missing)
+- Microsoft.Graph module (auto-installs if missing)
 - ImportExcel module (auto-installs if missing)
-- Permissions: read access to app registrations and service principals in your tenant
+- Delegated Graph permissions: `DelegatedPermissionGrant.Read.All`, `Directory.Read.All`, `Reports.Read.All`, `AuditLog.Read.All`
+
+## How it works
+
+The script runs 6 phases:
+
+1. **Connect** — signs in to Microsoft Graph with delegated permissions (browser prompt)
+2. **Grants** — fetches all delegated permission grants (`oauth2PermissionGrants`) and identifies apps using only baseline OIDC/directory scopes (e.g. `openid`, `profile`, `User.Read`)
+3. **Sign-in summary** — pulls app sign-in activity for the selected audit period (7 or 30 days)
+4. **Enrich apps** — resolves service principal details, classifies apps as tenant-owned or external
+5. **MFA audit** — checks sign-in logs to determine if each active app's users signed in with MFA or single-factor (SFA)
+6. **Export** — generates a formatted Excel report on your Desktop
+
+## Risk levels
+
+| Risk | Meaning |
+|------|---------|
+| HIGH | SFA-only sign-ins detected — these apps will likely break when CA enforces MFA |
+| MEDIUM | Active sign-ins all via MFA — should handle enforcement, but monitor |
+| LOW | No recent sign-in activity — lower immediate risk |
+| UNKNOWN | Audit log query failed — verify manually |
+
+## Output
+
+An Excel file saved to your Desktop: `ConditionalAccess_Readiness_Report_<timestamp>.xlsx`
+
+Sheets included:
+- **Executive Dashboard** — KPI summary with risk breakdown
+- **Tenant-Owned Apps** — apps registered in your tenant, sorted by risk
+- **External Apps** — third-party/multi-tenant apps, sorted by risk
+- **Scopes Reference** — list of baseline scopes that define which apps are in scope
 
 ## Usage
 
@@ -23,9 +53,6 @@ This tool scans your tenant and identifies those affected apps so you can prepar
 pwsh ./ca-affected-apps.ps1
 ```
 
-The script will:
-
-1. Connect to Microsoft Graph interactively
-2. Scan all app registrations and service principals
-3. Identify apps using only basic OIDC/directory scopes
-4. Generate an Excel report of affected apps
+The script will prompt for:
+- Global Admin UPN
+- Audit period (7 or 30 days)
