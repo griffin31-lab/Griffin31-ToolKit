@@ -26,12 +26,18 @@ token.*
 *.csv
 *.xlsx
 *.json
-!**/*config*.json
+# Intentional exception: repo-level package manifests only
+!package.json
+!package-lock.json
 
-# Output / report folders
+# Output / report folders (tenant-specific data — never commit)
 output/
 reports/
 exports/
+tenants/
+**/tenants/
+data/
+**/data/
 
 # macOS
 .AppleDouble

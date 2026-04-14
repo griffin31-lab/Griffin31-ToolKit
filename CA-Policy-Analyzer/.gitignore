@@ -1,0 +1,16 @@
+# Tenant-specific data — never commit
+tenants/
+data/
+reports/
+output/
+
+# Generated artifacts
+*.json
+*.html
+*.csv
+*.xlsx
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
