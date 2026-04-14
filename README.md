@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="https://github.com/griffin31-lab/Griffin31-ToolKit/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"/></a>
-  <img src="https://img.shields.io/badge/tools-4-green.svg" alt="4 Tools"/>
+  <img src="https://img.shields.io/badge/tools-5-green.svg" alt="5 Tools"/>
   <img src="https://img.shields.io/badge/PowerShell-7.x-blue.svg?logo=powershell&logoColor=white" alt="PowerShell 7"/>
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS-lightgrey.svg" alt="Platform"/>
 </p>
@@ -60,6 +60,15 @@ Walks your entire SPF include chain, counts the real DNS lookup total, and warns
 Finds devices that haven't signed in for X days, filters by OS type, shows a full audit with owner and MDM info, then lets you decide — export only, disable, or delete.
 
 **Tags:** `Entra ID` `Device Management` `Cleanup` `Compliance`
+
+---
+
+### [Entra-AppCredentials-Audit](Entra-AppCredentials-Audit/)
+> Audit expired and expiring app registration certificates and client secrets
+
+Scans all app registrations, flags expired and soon-to-expire credentials, resolves owners, and optionally removes expired ones. Generates an Excel report with direct links to each app in the Entra portal.
+
+**Tags:** `Entra ID` `App Registrations` `Certificates` `Secrets` `Credential Hygiene`
 
 ---
 
