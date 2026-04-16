@@ -93,6 +93,17 @@ Finds devices that haven't signed in for X days, filters by OS and ownership, sh
 <tr>
 <td width="50%" valign="top">
 
+### [Entra-StaleApps-Cleanup](Entra-StaleApps-Cleanup/)
+
+**Find and clean up unused app registrations**
+
+Every tenant accumulates unused app registrations — each one a credential exposure and a permission-abuse risk. This tool queries the Graph sign-in activity report, flags apps idle past your threshold, and lets you disable or delete them safely with a full audit trail.
+
+`Entra ID` · `App Registrations` · `Cleanup` · `Credential Hygiene`
+
+</td>
+<td width="50%" valign="top">
+
 ### [EXO-AppPermissions-Manager](EXO-AppPermissions-Manager/)
 
 **Exchange Online app-to-mailbox scoping, automated**
@@ -102,6 +113,8 @@ Creates management scopes, assigns roles, and verifies configuration in one flow
 `Exchange Online` · `RBAC` · `Mailbox Scoping`
 
 </td>
+</tr>
+<tr>
 <td width="50%" valign="top">
 
 ### [SPF-Lookup-Validator](SPF-Lookup-Validator/)
@@ -111,6 +124,11 @@ Creates management scopes, assigns roles, and verifies configuration in one flow
 Recursively walks your entire SPF include chain, counts the real DNS lookup total against the 10-lookup limit, and catches misconfigurations before they break email delivery.
 
 `SPF` · `Email Security` · `DNS`
+
+</td>
+<td width="50%" valign="top">
+
+&nbsp;
 
 </td>
 </tr>
