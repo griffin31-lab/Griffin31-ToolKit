@@ -165,16 +165,36 @@ try {
 Write-Host ""
 Write-Host "  [4/6] Creating Entra ID app '$ApplicationName'..." -ForegroundColor Cyan
 
+# Create app first WITHOUT keyCredentials or permissions — simpler + more reliable.
+# Then add keyCredentials and requiredResourceAccess via PATCH.
 $appBody = @{
-    displayName     = $ApplicationName
-    signInAudience  = 'AzureADMyOrg'
+    displayName    = $ApplicationName
+    signInAudience = 'AzureADMyOrg'
+} | ConvertTo-Json -Depth 3
+
+try {
+    $app = Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/applications" -Body $appBody -ContentType "application/json"
+    $clientId = $app.appId
+    $appObjectId = $app.id
+    Write-Host "        Created app $clientId" -ForegroundColor Green
+} catch {
+    Write-Host "        [!] Create-app failed: $($_.Exception.Message)" -ForegroundColor Red
+    exit 1
+}
+
+# Attach cert + required permissions
+$startDt = (Get-Date).ToUniversalTime().AddMinutes(-5).ToString('yyyy-MM-ddTHH:mm:ssZ')
+$endDt   = $notAfter.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+
+$patchBody = @{
     keyCredentials  = @(
         @{
-            type        = 'AsymmetricX509Cert'
-            usage       = 'Verify'
-            key         = $certBase64
-            displayName = "Griffin31 SPO Audit cert"
-            endDateTime = $notAfter.ToUniversalTime().ToString('o')
+            type            = 'AsymmetricX509Cert'
+            usage           = 'Verify'
+            key             = $certBase64
+            displayName     = "Griffin31 SPO Audit cert"
+            startDateTime   = $startDt
+            endDateTime     = $endDt
         }
     )
     requiredResourceAccess = @(
@@ -190,12 +210,12 @@ $appBody = @{
 } | ConvertTo-Json -Depth 6
 
 try {
-    $app = Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/applications" -Body $appBody -ContentType "application/json"
-    $clientId = $app.appId
-    $appObjectId = $app.id
-    Write-Host "        Created app $clientId" -ForegroundColor Green
+    Invoke-MgGraphRequest -Method PATCH -Uri "https://graph.microsoft.com/v1.0/applications/$appObjectId" -Body $patchBody -ContentType "application/json" | Out-Null
+    Write-Host "        Attached cert + permissions" -ForegroundColor Green
 } catch {
-    Write-Host "        [!] Create-app failed: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "        [!] PATCH app failed: $($_.Exception.Message)" -ForegroundColor Red
+    # Clean up the half-created app
+    try { Invoke-MgGraphRequest -Method DELETE -Uri "https://graph.microsoft.com/v1.0/applications/$appObjectId" | Out-Null } catch {}
     exit 1
 }
 
