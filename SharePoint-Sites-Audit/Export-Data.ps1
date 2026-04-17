@@ -42,6 +42,17 @@ $certPath     = $config.CertificatePath
 $encryptedPw  = $config.EncryptedCertPassword
 $thumbprint   = $config.CertificateThumbprint
 
+# Detect "fresh setup" — if the app was registered within the last 2 minutes, 700016 is
+# almost certainly propagation delay. Otherwise it's a deleted/stale app → fast-fail.
+$isFreshSetup = $false
+if ($config.RegisteredAt) {
+    try {
+        $registeredAt = [datetime]::Parse($config.RegisteredAt, [System.Globalization.CultureInfo]::InvariantCulture)
+        $ageSeconds = ((Get-Date).ToUniversalTime() - $registeredAt.ToUniversalTime()).TotalSeconds
+        if ($ageSeconds -lt 120) { $isFreshSetup = $true }
+    } catch {}
+}
+
 if (-not (Test-Path $certPath)) {
     Write-Host "  [!] Certificate not found: $certPath" -ForegroundColor Red
     Write-Host "      Config may be stale. Delete config.json and re-run to redo setup." -ForegroundColor Yellow
@@ -55,13 +66,11 @@ Write-Host "  [1/4] Connecting to SharePoint Online (PnP, cert auth — silent).
 Import-Module PnP.PowerShell -ErrorAction Stop
 
 function Connect-PnPWithRetry {
-    # Treat 700016 ("app not found") as a propagation issue for the first ~90s — newly-created
-    # apps commonly take 30-90s before the auth endpoint sees them. After that window, we treat
-    # it as "actually deleted" and the outer handler wipes config and re-runs setup.
-    $maxAttempts    = 5
-    $delays         = @(0, 20, 30, 45, 60)
-    $max700016      = 3   # after 3 attempts (~50s cumulative), stop retrying 700016 and treat as deleted
-    $count700016    = 0
+    # 700016 ("app not found") handling:
+    #   - If the app was registered in the last 2 minutes → treat as propagation, retry briefly
+    #   - Otherwise → fast-fail so the outer handler wipes config and triggers re-setup
+    $maxAttempts = 5
+    $delays      = @(0, 20, 30, 45, 60)
 
     for ($i = 0; $i -lt $maxAttempts; $i++) {
         if ($delays[$i] -gt 0) {
@@ -80,8 +89,8 @@ function Connect-PnPWithRetry {
         } catch {
             $msg = $_.Exception.Message
             if ($msg -match 'AADSTS700016|was not found in the directory') {
-                $count700016++
-                if ($count700016 -ge $max700016) { throw }  # app is actually deleted — let outer handler recover
+                if (-not $isFreshSetup) { throw }  # app is genuinely gone — recover immediately
+                if ($i -ge 2) { throw }            # fresh setup but still failing after ~50s → give up
                 Write-Host "        (new app propagation pending — retrying)" -ForegroundColor DarkGray
                 continue
             }
