@@ -140,14 +140,58 @@ function Initialize-TenantDirectory {
   foreach ($d in @($TenantInfo.TenantDir, $dataDir, $reportsDir)) {
     if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
   }
-  return @{ DataDir = $dataDir; ReportsDir = $reportsDir }
+  return @{
+    DataDir    = $dataDir
+    ReportsDir = $reportsDir
+    ConfigPath = Join-Path $TenantInfo.TenantDir "config.json"
+  }
+}
+
+function Get-PnPClientId {
+  param($Directories)
+  if (Test-Path $Directories.ConfigPath) {
+    try {
+      $cfg = Get-Content $Directories.ConfigPath -Raw | ConvertFrom-Json
+      if ($cfg.ClientId) { return $cfg.ClientId }
+    } catch {}
+  }
+  return $null
+}
+
+function Invoke-FirstTimeSetup {
+  param($TenantInfo, $Directories)
+  Write-Header "FIRST-TIME SETUP - $($TenantInfo.Domain)"
+
+  $regScript = Join-Path $PSScriptRoot "Register-PnPApp.ps1"
+  if (-not (Test-Path $regScript)) {
+    Write-ColorText "ERROR: Register-PnPApp.ps1 not found." -Color Red
+    Write-ColorText "`nPress any key..." -Color Gray
+    $null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+    return
+  }
+
+  try {
+    & $regScript -TenantDomain $TenantInfo.Domain -ConfigPath $Directories.ConfigPath
+    Write-ColorText "`nSetup finished. Check above for success or errors." -Color Green
+  } catch {
+    Write-ColorText "`nSetup failed: $($_.Exception.Message)" -Color Red
+  }
+  Write-ColorText "`nPress any key..." -Color Gray
+  $null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
 }
 
 function Show-MainMenu {
-  param($TenantInfo)
+  param($TenantInfo, $Directories)
   Write-Header "MAIN MENU - $($TenantInfo.Domain)"
+  $hasClientId = [bool](Get-PnPClientId -Directories $Directories)
   Write-ColorText "Tenant directory: $($TenantInfo.TenantDir)" -Color Gray
+  if ($hasClientId) {
+    Write-ColorText "PnP app: configured" -Color DarkGreen
+  } else {
+    Write-ColorText "PnP app: NOT configured — run option 0 first" -Color Yellow
+  }
   Write-ColorText ""
+  Write-ColorText "0. First-time setup (register PnP Entra app — run ONCE)" -Color $(if ($hasClientId) { 'DarkGray' } else { 'Green' })
   Write-ColorText "1. Export data only (SharePoint + Graph)" -Color White
   Write-ColorText "2. Analyze existing data" -Color White
   Write-ColorText "3. Full pipeline — Sample mode (top 100 sites by storage)" -Color Green
@@ -155,13 +199,23 @@ function Show-MainMenu {
   Write-ColorText "5. View previous reports" -Color White
   Write-ColorText "6. Exit" -Color White
   Write-ColorText ""
-  Write-Host -NoNewline "Select option (1-6): " -ForegroundColor Yellow
+  Write-Host -NoNewline "Select option (0-6): " -ForegroundColor Yellow
 }
 
 function Invoke-DataExport {
   param($TenantInfo, $Directories, [bool]$FullScan = $false)
   Write-Header "DATA EXPORT - $($TenantInfo.Domain)"
   Write-ColorText "Mode: $(if ($FullScan) { 'Full scan' } else { 'Sample (top 100 sites)' })" -Color Gray
+
+  $clientId = Get-PnPClientId -Directories $Directories
+  if (-not $clientId) {
+    Write-ColorText "`n[!] PnP Entra app is not configured yet." -Color Red
+    Write-ColorText "    Run menu option 0 (First-time setup) first." -Color Yellow
+    Write-ColorText "`nPress any key to return..." -Color Gray
+    $null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+    return $false
+  }
+  Write-ColorText "Using PnP ClientId: $clientId" -Color DarkGray
 
   $exportScript = Join-Path $PSScriptRoot "Export-Data.ps1"
   if (-not (Test-Path $exportScript)) {
@@ -172,7 +226,6 @@ function Invoke-DataExport {
   }
 
   try {
-    # Run in fresh PS process to avoid Graph assembly conflicts
     $pwshCmd = (Get-Command pwsh -ErrorAction SilentlyContinue).Source
     if (-not $pwshCmd) { $pwshCmd = (Get-Command powershell -ErrorAction SilentlyContinue).Source }
     if (-not $pwshCmd) { throw "PowerShell not found." }
@@ -182,7 +235,8 @@ function Invoke-DataExport {
       '-File', $exportScript,
       '-OutputFolder', $Directories.DataDir,
       '-TenantDomain', $TenantInfo.Domain,
-      '-SpoAdminUrl', $TenantInfo.SpoAdminUrl
+      '-SpoAdminUrl', $TenantInfo.SpoAdminUrl,
+      '-ClientId', $clientId
     )
     if ($FullScan) { $pwshArgs += '-FullScan' }
 
@@ -298,9 +352,10 @@ $tenant = Get-TenantInfo
 $dirs   = Initialize-TenantDirectory -TenantInfo $tenant
 
 while ($true) {
-  Show-MainMenu -TenantInfo $tenant
+  Show-MainMenu -TenantInfo $tenant -Directories $dirs
   $choice = Read-Host
   switch ($choice) {
+    '0' { Invoke-FirstTimeSetup -TenantInfo $tenant -Directories $dirs }
     '1' { Invoke-DataExport -TenantInfo $tenant -Directories $dirs -FullScan $false | Out-Null }
     '2' { Invoke-Analysis   -TenantInfo $tenant -Directories $dirs | Out-Null }
     '3' {

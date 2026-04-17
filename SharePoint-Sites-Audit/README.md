@@ -40,15 +40,18 @@ Per-entity, per-API. Fourteen checks covering four entity types:
 - **Role**: SharePoint Administrator minimum
 - **Graph scopes**: `Group.Read.All`, `Directory.Read.All`, `InformationProtectionPolicy.Read`
 
-### First-run note on PnP app consent
+### First-time setup (ONCE per tenant)
 
-On first connection, PnP will request consent for the **PnP Management Shell** app in your tenant. Approve once — subsequent runs use the stored consent. If your tenant blocks that app, register your own Entra ID app:
+PnP.PowerShell 3.x no longer ships with a shared Microsoft app — every tenant registers its own. The tool does this for you on first run:
 
-```powershell
-Register-PnPEntraIDApp -ApplicationName 'Griffin31 SPO Audit' -Tenant <your-tenant>.onmicrosoft.com -Interactive
-```
+1. Launch `pwsh ./SPO-Manager.ps1`
+2. Pick menu option **0** ("First-time setup")
+3. A browser window opens — sign in as Global Administrator and approve consent
+4. Tool saves the generated ClientId to `tenants/<your-domain>/config.json`
 
-Then pass the returned ClientId to the export script via `-ClientId <guid>`.
+After that, options 1-4 work without further prompts. The registered app is **delegated-only** — no client secret, no certificate. Scopes requested: `Group.Read.All`, `Directory.Read.All`, `InformationProtectionPolicy.Read`, `SharePoint AllSites.FullControl`.
+
+If your org doesn't allow non-GA admins to register apps, ask a Global Admin to run option 0 once; the ClientId can then be reused by any delegated user with SharePoint Admin role.
 
 ## How it works
 
