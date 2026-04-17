@@ -168,17 +168,40 @@ try {
 
 # ── Helpers ──
 function Invoke-GraphPaged {
-    param([string]$Uri, [hashtable]$ExtraHeaders = @{})
+    param(
+        [string]$Uri,
+        [hashtable]$ExtraHeaders = @{},
+        [switch]$SilentFail       # if set, return @() on error instead of throwing
+    )
     $all = @()
     $next = $Uri
     $headers = @{ Authorization = "Bearer $script:graphToken" }
     foreach ($k in $ExtraHeaders.Keys) { $headers[$k] = $ExtraHeaders[$k] }
+
     while ($next) {
-        try {
-            $resp = Invoke-RestMethod -Method GET -Uri $next -Headers $headers -ErrorAction Stop
-        } catch {
-            Write-Host "        [!] Graph request failed for $next : $($_.Exception.Message)" -ForegroundColor Red
-            throw
+        $attempt = 0
+        $maxAttempts = 4
+        $backoff = @(0, 30, 45, 60)
+        $succeeded = $false
+        while ($attempt -lt $maxAttempts -and -not $succeeded) {
+            if ($backoff[$attempt] -gt 0) {
+                Write-Host "        (permission propagation — retrying in $($backoff[$attempt])s)" -ForegroundColor DarkGray
+                Start-Sleep -Seconds $backoff[$attempt]
+            }
+            try {
+                $resp = Invoke-RestMethod -Method GET -Uri $next -Headers $headers -ErrorAction Stop
+                $succeeded = $true
+            } catch {
+                $statusCode = 0
+                try { $statusCode = [int]$_.Exception.Response.StatusCode } catch {}
+                $isRetryable = ($statusCode -in 401, 403, 429, 500, 502, 503, 504)
+                if (-not $isRetryable -or $attempt -ge $maxAttempts - 1) {
+                    if ($SilentFail) { return @() }
+                    Write-Host "        [!] Graph request failed for $next : $($_.Exception.Message)" -ForegroundColor Red
+                    throw
+                }
+                $attempt++
+            }
         }
         if ($resp.value) { $all += $resp.value }
         $next = $resp.'@odata.nextLink'
@@ -350,11 +373,11 @@ foreach ($g in $probeSet) {
 }
 Write-Progress -Activity "Group members" -Completed
 
-# Sensitivity label catalog (optional)
-$labelCatalog = @()
-try {
-    $labelCatalog = Invoke-GraphPaged "https://graph.microsoft.com/beta/security/informationProtection/sensitivityLabels?`$top=999"
-} catch {}
+# Sensitivity label catalog (optional — beta endpoint, some tenants restrict app-only access)
+$labelCatalog = @(Invoke-GraphPaged -Uri "https://graph.microsoft.com/beta/security/informationProtection/sensitivityLabels?`$top=999" -SilentFail)
+if ($labelCatalog.Count -eq 0) {
+    Write-Host "        (sensitivity label catalog unavailable — continuing without label names)" -ForegroundColor DarkGray
+}
 
 # ── Save JSON artifacts ──
 $ctxExport = @{
