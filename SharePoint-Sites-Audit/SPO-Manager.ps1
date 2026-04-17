@@ -261,7 +261,8 @@ function Invoke-DataExport {
     $process = Start-Process -FilePath $pwshCmd -ArgumentList $pwshArgs -Wait -PassThru -NoNewWindow
 
     # Exit code 2 = app registration was deleted; Export-Data already moved config.json aside.
-    # Auto-recover: run setup again, then retry the export.
+    # Auto-recover ONCE: run setup, then retry the export. Never loop (prevents runaway setup
+    # loops if Azure propagation is unusually slow).
     if ($process.ExitCode -eq 2) {
       Write-ColorText "`n[!] Stale app detected — running setup to register a new app..." -Color Yellow
       Invoke-FirstTimeSetup -TenantInfo $TenantInfo -Directories $Directories
@@ -271,6 +272,15 @@ function Invoke-DataExport {
       }
       Write-ColorText "`nRetrying export with the new app..." -Color Cyan
       $process = Start-Process -FilePath $pwshCmd -ArgumentList $pwshArgs -Wait -PassThru -NoNewWindow
+
+      # Second attempt — if still exit 2, Azure propagation is unusually slow for the new app.
+      # Don't loop setup. Tell the user to wait and retry manually.
+      if ($process.ExitCode -eq 2) {
+        Write-ColorText "`n[!] The new app was registered but Azure has not finished propagating it." -Color Yellow
+        Write-ColorText "    This can occasionally take 2-5 minutes. Wait a moment, then pick the" -Color Yellow
+        Write-ColorText "    same menu option again. No need to re-run setup." -Color Yellow
+        return $false
+      }
     }
 
     if ($process.ExitCode -ne 0) { throw "Export exited with code $($process.ExitCode)" }
