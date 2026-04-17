@@ -63,11 +63,36 @@ try {
         -ErrorAction Stop
     Write-Host "        Connected to $SpoAdminUrl" -ForegroundColor Green
 } catch {
-    Write-Host "        [!] PnP connection failed: $($_.Exception.Message)" -ForegroundColor Red
-    if ($_.Exception.Message -match 'AADSTS7000215|invalid_client|AADSTS50034|unauthorized|AADSTS700016') {
+    $errMsg = $_.Exception.Message
+    Write-Host "        [!] PnP connection failed: $errMsg" -ForegroundColor Red
+
+    # AADSTS700016 = app not found in the directory. This means the Entra app was deleted
+    # (or the ClientId in config is wrong). The config is stale — wipe it and re-run setup next time.
+    if ($errMsg -match 'AADSTS700016|was not found in the directory') {
+        Write-Host ""
+        Write-Host "  [!] The Entra ID app registration '$clientId' no longer exists in your tenant." -ForegroundColor Yellow
+        Write-Host "      It was probably deleted. I will now clear the stale local config so the next" -ForegroundColor Yellow
+        Write-Host "      run automatically triggers first-time setup to register a new app." -ForegroundColor Yellow
+        Write-Host ""
+        try {
+            $configDir = Split-Path $ConfigPath -Parent
+            $backupPath = "$ConfigPath.bak-$(Get-Date -Format 'yyyyMMddHHmmss')"
+            if (Test-Path $ConfigPath) { Move-Item -Path $ConfigPath -Destination $backupPath -Force }
+            $certFolder = Join-Path $configDir "cert"
+            if (Test-Path $certFolder) { Remove-Item -Path $certFolder -Recurse -Force -ErrorAction SilentlyContinue }
+            Write-Host "      Stale config moved to: $backupPath" -ForegroundColor DarkGray
+            Write-Host "      Stale cert folder removed." -ForegroundColor DarkGray
+            Write-Host ""
+            Write-Host "      -> Run the tool again and pick the same menu option. Setup will auto-trigger." -ForegroundColor Green
+        } catch {
+            Write-Host "      [!] Could not clean up config: $($_.Exception.Message)" -ForegroundColor Red
+            Write-Host "          Manually delete $ConfigPath and re-run." -ForegroundColor Yellow
+        }
+        exit 2
+    }
+    if ($errMsg -match 'AADSTS7000215|invalid_client|AADSTS50034|unauthorized|consent|propagat') {
         Write-Host ""
         Write-Host "  [!] Admin consent may not have propagated yet. Wait 2-3 minutes and retry." -ForegroundColor Yellow
-        Write-Host "      If the problem persists, delete config.json and re-run setup." -ForegroundColor Yellow
     }
     exit 1
 }
