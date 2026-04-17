@@ -1,10 +1,8 @@
 <div align="center">
 
-<img src="https://avatars.githubusercontent.com/u/230988388?s=160" alt="Griffin31" width="120" height="120" style="border-radius: 20px"/>
-
-# Griffin31 ToolKit
-
-### Open-source security tooling for Microsoft 365, Entra ID, and cloud identity.
+<a href="https://www.griffin31.com">
+  <img src=".github/griffin31-hero.png" alt="Griffin31 ToolKit — Open-source security tooling for Microsoft 365" width="100%"/>
+</a>
 
 <p>
   Built by security engineers, for security engineers. Production-grade PowerShell tools<br/>
@@ -216,7 +214,7 @@ The ToolKit is the free, open-source foundation of the same analysis engines tha
 <div align="center">
   <br/>
   <a href="https://www.griffin31.com">
-    <img src="https://avatars.githubusercontent.com/u/230988388?s=80" alt="Griffin31" width="60" height="60" style="border-radius: 12px"/>
+    <img src="https://avatars.githubusercontent.com/u/226283929?s=80" alt="Griffin31" width="60" height="60" style="border-radius: 12px"/>
   </a>
   <br/>
   <sub><strong>Made with care by the Griffin31 team</strong></sub>
