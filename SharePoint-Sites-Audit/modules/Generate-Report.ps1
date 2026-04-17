@@ -90,6 +90,22 @@ function FormatBytes($b) {
 
 $bandColor = BandColor $tenantBand
 
+# ── Full catalog of checks the tool runs (used to compute "healthy checks") ──
+$checkCatalog = @(
+    [PSCustomObject]@{ Id="SP-001"; Severity="High";   Title="Publicly accessible site (Anyone links enabled)" }
+    [PSCustomObject]@{ Id="SP-003"; Severity="High";   Title="Excessive external users on site (> 10)" }
+    [PSCustomObject]@{ Id="SP-004"; Severity="Medium"; Title="Site sharing more permissive than tenant baseline" }
+    [PSCustomObject]@{ Id="SP-005"; Severity="Medium"; Title="Inactive site (no content changes > 365 days)" }
+    [PSCustomObject]@{ Id="SP-006"; Severity="Medium"; Title="Non-group site with no primary admin" }
+    [PSCustomObject]@{ Id="SP-007"; Severity="Medium"; Title="Site missing sensitivity label" }
+    [PSCustomObject]@{ Id="SP-008"; Severity="Medium"; Title="External users on non-group site (likely direct grants)" }
+    [PSCustomObject]@{ Id="OD-009"; Severity="High";   Title="OneDrive with excessive external users (> 5)" }
+    [PSCustomObject]@{ Id="OD-010"; Severity="Medium"; Title="OneDrive sharing more permissive than tenant baseline" }
+    [PSCustomObject]@{ Id="GT-011"; Severity="Medium"; Title="M365 Group missing sensitivity label" }
+    [PSCustomObject]@{ Id="GT-012"; Severity="Medium"; Title="Team missing sensitivity label" }
+    [PSCustomObject]@{ Id="GT-013"; Severity="Medium"; Title="Group/Team has guests and no sensitivity label" }
+)
+
 # ── Build entity rows + per-type counts + grouped-by-finding view ──
 $entityRowsHtml = ""
 $detailsMapJson = ""
@@ -208,6 +224,19 @@ $onedriveCount = $typeCounts['OneDrive']
 $groupCount = $typeCounts['Group']
 $teamCount = $typeCounts['Team']
 $totalCount = $siteCount + $onedriveCount + $groupCount + $teamCount
+
+# ── Compute "Healthy checks" (catalog items that fired no findings) ──
+$firedIds = @($flatFindings | ForEach-Object { $_.FindingId } | Select-Object -Unique)
+$healthyChecks = @($checkCatalog | Where-Object { $_.Id -notin $firedIds })
+$healthyHtml = ""
+if ($healthyChecks.Count -gt 0) {
+    foreach ($c in $healthyChecks) {
+        $healthyHtml += "<li><span class='hc-id'>$(HtmlEncode $c.Id)</span> <span class='hc-title'>$(HtmlEncode $c.Title)</span></li>"
+    }
+}
+$healthyCount = $healthyChecks.Count
+$firedCount   = $firedIds.Count
+$totalChecks  = $checkCatalog.Count
 
 # ── Assemble full HTML ──
 $html = @"
@@ -409,6 +438,49 @@ $html = @"
   }
   .expand-controls button:hover { border-color: var(--accent); color: var(--accent); }
 
+  /* Healthy checks block — subtle, green, collapsed by default */
+  .healthy-block {
+    background: #F0FDF4;
+    border: 1px solid #BBF7D0;
+    border-radius: 6px;
+    margin-top: 24px;
+    padding: 0 16px;
+  }
+  .healthy-block summary {
+    display: flex; align-items: center; gap: 10px;
+    padding: 12px 0;
+    font-size: 14px; font-weight: 600; color: #065F46;
+    cursor: pointer;
+    list-style: none;
+  }
+  .healthy-block summary::-webkit-details-marker { display: none; }
+  .healthy-block summary::marker { content: ''; }
+  .hc-check-icon {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 22px; height: 22px; border-radius: 50%;
+    background: #065F46; color: white;
+    font-size: 13px; font-weight: 700;
+  }
+  .healthy-block .hc-count {
+    margin-left: auto;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px; color: #065F46; opacity: 0.75;
+  }
+  .hc-intro { font-size: 12px; color: #065F46; margin: 0 0 10px 0; opacity: 0.85; }
+  .healthy-list { list-style: none; padding: 0; margin: 0 0 14px 0; }
+  .healthy-list li {
+    padding: 6px 0;
+    border-top: 1px dashed #BBF7D0;
+    font-size: 13px;
+    display: flex; gap: 10px; align-items: baseline;
+  }
+  .hc-id {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px; color: #065F46; background: #DCFCE7;
+    padding: 1px 8px; border-radius: 3px; flex-shrink: 0;
+  }
+  .hc-title { color: var(--text); }
+
   /* Entity table */
   table.entities {
     width: 100%; background: white; border-collapse: collapse;
@@ -545,6 +617,16 @@ $html = @"
         <button class='collapse-all-btn' type='button' data-target='grouped'>Collapse all</button>
       </div>
       $groupedHtml
+
+      <details class='healthy-block'>
+        <summary>
+          <span class='hc-check-icon' aria-hidden='true'>&#10003;</span>
+          Healthy checks
+          <span class='hc-count'>$healthyCount of $totalChecks</span>
+        </summary>
+        <p class='hc-intro'>The tool ran these checks and your tenant passed. No findings means no matching entities were detected.</p>
+        <ul class='healthy-list'>$healthyHtml</ul>
+      </details>
     </div>
 
     <!-- GROUP BY ENTITY VIEW -->
