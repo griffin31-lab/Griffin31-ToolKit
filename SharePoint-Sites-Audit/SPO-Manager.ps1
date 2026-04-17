@@ -27,9 +27,9 @@ if ($PSVersionTable.PSVersion.Major -lt 7) {
   Write-Host "  [!] This script requires PowerShell 7 or later." -ForegroundColor Red
   Write-Host ""
   if ($IsWindows -or $env:OS -match "Windows") {
-    Write-Host "  Install it from: https://aka.ms/install-powershell" -ForegroundColor Yellow
+    Write-Host "  Install it from: https://aka.ms/install-powershell" -ForegroundColor DarkGray
   } else {
-    Write-Host "  Install it with:  brew install powershell/tap/powershell" -ForegroundColor Yellow
+    Write-Host "  Install it with:  brew install powershell/tap/powershell" -ForegroundColor DarkGray
   }
   Write-Host ""
   return
@@ -45,7 +45,7 @@ if (-not (Get-Module -ListAvailable -Name PnP.PowerShell)) {
     Write-Host "  Cannot continue without PnP.PowerShell. Exiting." -ForegroundColor Red
     return
   }
-  Write-Host "  Installing PnP.PowerShell (this may take a few minutes)..." -ForegroundColor Yellow
+  Write-Host "  Installing PnP.PowerShell (this may take a few minutes)..." -ForegroundColor Cyan
   Install-Module PnP.PowerShell -Scope CurrentUser -Force -AllowClobber
   Write-Host "  Installed." -ForegroundColor Green
 }
@@ -60,7 +60,7 @@ if (-not (Get-Module -ListAvailable -Name Microsoft.Graph.Authentication)) {
     Write-Host "  Cannot continue without Microsoft.Graph. Exiting." -ForegroundColor Red
     return
   }
-  Write-Host "  Installing Microsoft.Graph (this may take a few minutes)..." -ForegroundColor Yellow
+  Write-Host "  Installing Microsoft.Graph (this may take a few minutes)..." -ForegroundColor Cyan
   Install-Module Microsoft.Graph -Scope CurrentUser -Force -AllowClobber
   Write-Host "  Installed." -ForegroundColor Green
 } else {
@@ -77,12 +77,12 @@ function Write-ColorText {
 function Write-Header {
   param([string]$Title)
   Clear-Host
-  Write-ColorText "===================================================================" -Color Cyan
-  Write-ColorText "           SHAREPOINT SITES AUDIT MANAGER v1.0" -Color Yellow
-  Write-ColorText "===================================================================" -Color Cyan
+  Write-ColorText "===================================================================" -Color DarkBlue
+  Write-ColorText "           SHAREPOINT SITES AUDIT MANAGER v1.0" -Color White
+  Write-ColorText "===================================================================" -Color DarkBlue
   Write-ColorText ""
   if ($Title) {
-    Write-ColorText "  $Title" -Color Green
+    Write-ColorText "  $Title" -Color Cyan
     Write-ColorText ""
   }
 }
@@ -93,7 +93,7 @@ function Get-TenantInfo {
   do {
     Write-ColorText "Enter the tenant domain or UPN:" -Color White
     Write-ColorText "Examples: contoso.onmicrosoft.com OR admin@contoso.onmicrosoft.com" -Color Gray
-    Write-Host -NoNewline "Tenant: " -ForegroundColor Yellow
+    Write-Host -NoNewline "Tenant: " -ForegroundColor Cyan
     $inputVal = Read-Host
 
     $domainPattern = '^[a-zA-Z0-9][a-zA-Z0-9.-]{0,252}\.[a-zA-Z]{2,63}$'
@@ -188,11 +188,11 @@ function Show-MainMenu {
   Write-ColorText "1. Export data only (SharePoint + Graph)" -Color White
   Write-ColorText "2. Analyze existing data" -Color White
   Write-ColorText "3. Full pipeline — Sample mode (top 100 sites by storage)" -Color Green
-  Write-ColorText "4. Full pipeline — Full scan (all sites; slow on large tenants)" -Color Yellow
+  Write-ColorText "4. Full pipeline — Full scan (all sites; slow on large tenants)" -Color White
   Write-ColorText "5. View previous reports" -Color White
   Write-ColorText "6. Exit" -Color White
   Write-ColorText ""
-  Write-Host -NoNewline "Select option (1-6): " -ForegroundColor Yellow
+  Write-Host -NoNewline "Select option (1-6): " -ForegroundColor Cyan
 }
 
 function Confirm-Setup {
@@ -201,11 +201,11 @@ function Confirm-Setup {
   if (Get-PnPClientId -Directories $Directories) { return $true }
 
   Write-Host ""
-  Write-ColorText "No PnP app is registered for this tenant yet." -Color Yellow
-  Write-ColorText "First-time setup will register an Entra ID app + generate a cert." -Color Gray
-  Write-ColorText "You will need Global Administrator access ONCE to approve consent." -Color Gray
+  Write-ColorText "No PnP app is registered for this tenant yet." -Color White
+  Write-ColorText "First-time setup will register an Entra ID app + generate a cert." -Color DarkGray
+  Write-ColorText "You will need Global Administrator access ONCE to approve consent." -Color DarkGray
   Write-Host ""
-  Write-Host -NoNewline "Run first-time setup now? (Y/n): " -ForegroundColor Yellow
+  Write-Host -NoNewline "Run first-time setup now? (Y/n): " -ForegroundColor Cyan
   $answer = Read-Host
   if ($answer -eq 'n' -or $answer -eq 'N') {
     Write-ColorText "Cancelled. Cannot run without a registered app." -Color Red
@@ -242,7 +242,7 @@ function Invoke-DataExport {
     $pwshCmd = (Get-Command pwsh -ErrorAction SilentlyContinue).Source
     if (-not $pwshCmd) {
       Write-ColorText "`n[!] 'pwsh' (PowerShell 7) not found on PATH. This tool requires PS7." -Color Red
-      Write-ColorText "    Install from https://aka.ms/install-powershell" -Color Yellow
+      Write-ColorText "    Install from https://aka.ms/install-powershell" -Color DarkGray
       Write-ColorText "`nPress any key..." -Color Gray
       $null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
       return $false
@@ -310,7 +310,7 @@ function Invoke-Analysis {
     $p = Join-Path $Directories.DataDir $f
     if (-not (Test-Path $p)) {
       Write-ColorText "ERROR: Missing data file: $f" -Color Red
-      Write-ColorText "Run Export first (option 1 or 3)." -Color Yellow
+      Write-ColorText "Run Export first (option 1 or 3)." -Color White
       Write-ColorText "Press any key..." -Color Gray
       $null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
       return $null
@@ -333,7 +333,7 @@ function Invoke-Analysis {
     if ($reports.Count -gt 0) {
       $latest = $reports[0]
       Write-ColorText "`nAnalysis complete. Report: $($latest.Name)" -Color Green
-      Write-Host -NoNewline "`nOpen report in browser? (Y/N): " -ForegroundColor Yellow
+      Write-Host -NoNewline "`nOpen report in browser? (Y/N): " -ForegroundColor Cyan
       $answer = Read-Host
       if ($answer -match '^[Yy]') {
         try {
@@ -345,7 +345,7 @@ function Invoke-Analysis {
       }
       return $latest.FullName
     }
-    Write-ColorText "`nAnalysis completed but no report file found." -Color Yellow
+    Write-ColorText "`nAnalysis completed but no report file found." -Color White
     return $null
   } catch {
     Write-ColorText "`nERROR during analysis: $($_.Exception.Message)" -Color Red
@@ -363,7 +363,7 @@ function Show-PreviousReports {
   $reports = Get-ChildItem -Path $Directories.ReportsDir -Filter "SP_Sites_Audit_*.html" -ErrorAction SilentlyContinue |
              Sort-Object LastWriteTime -Descending
   if ($reports.Count -eq 0) {
-    Write-ColorText "No reports found in $($Directories.ReportsDir)" -Color Yellow
+    Write-ColorText "No reports found in $($Directories.ReportsDir)" -Color DarkGray
     Write-ColorText "`nPress any key..." -Color Gray
     $null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
     return
@@ -376,7 +376,7 @@ function Show-PreviousReports {
     Write-ColorText "   Size:    $([math]::Round($r.Length / 1KB, 2)) KB" -Color Gray
     Write-ColorText ""
   }
-  Write-Host -NoNewline "Select report to open (1-$($reports.Count)) or Enter to return: " -ForegroundColor Yellow
+  Write-Host -NoNewline "Select report to open (1-$($reports.Count)) or Enter to return: " -ForegroundColor Cyan
   $sel = Read-Host
   if ($sel -match '^\d+$' -and [int]$sel -ge 1 -and [int]$sel -le $reports.Count) {
     $chosen = $reports[[int]$sel - 1]

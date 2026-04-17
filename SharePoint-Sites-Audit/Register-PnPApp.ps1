@@ -13,9 +13,9 @@ param(
 $ErrorActionPreference = "Stop"
 
 Write-Host ""
-Write-Host "  ================================================================" -ForegroundColor Cyan
-Write-Host "     SharePoint Sites Audit — First-time setup" -ForegroundColor Yellow
-Write-Host "  ================================================================" -ForegroundColor Cyan
+Write-Host "  ================================================================" -ForegroundColor DarkBlue
+Write-Host "     SharePoint Sites Audit — First-time setup" -ForegroundColor White
+Write-Host "  ================================================================" -ForegroundColor DarkBlue
 Write-Host ""
 Write-Host "  I'll do the following — this runs ONCE per tenant:" -ForegroundColor White
 Write-Host "    1. Prompt you to sign in as Global Administrator (device login)" -ForegroundColor Gray
@@ -29,13 +29,13 @@ Write-Host "  After setup, every subsequent run is silent — no login needed." 
 Write-Host ""
 
 if (-not $ApplicationName) {
-    Write-Host -NoNewline "  App name (press ENTER for 'Griffin31 SPO Audit'): " -ForegroundColor Yellow
+    Write-Host -NoNewline "  App name (press ENTER for 'Griffin31 SPO Audit'): " -ForegroundColor Cyan
     $ApplicationName = Read-Host
     if (-not $ApplicationName) { $ApplicationName = "Griffin31 SPO Audit" }
 }
 
 Write-Host ""
-Write-Host "  Press ENTER to start (a browser window / device-code prompt will appear)." -ForegroundColor Yellow
+Write-Host "  Press ENTER to start (a browser window / device-code prompt will appear)." -ForegroundColor Cyan
 $null = Read-Host
 
 # ── Prepare cert output folder ──
@@ -287,8 +287,8 @@ Write-Host "    Cert:        $pfxPath" -ForegroundColor Gray
 Write-Host "    Thumbprint:  $thumbprint" -ForegroundColor Gray
 Write-Host "    Config:      $ConfigPath" -ForegroundColor Gray
 Write-Host ""
-Write-Host "  Note: token propagation takes ~60 seconds. If the first export fails with" -ForegroundColor Yellow
-Write-Host "  'unauthorized' or 'insufficient privileges', wait 1-2 minutes and retry." -ForegroundColor Yellow
+Write-Host "  Note: token propagation takes ~60 seconds. If the first export fails with" -ForegroundColor DarkGray
+Write-Host "  'unauthorized' or 'insufficient privileges', wait 1-2 minutes and retry." -ForegroundColor DarkGray
 
 try { Disconnect-MgGraph -ErrorAction SilentlyContinue } catch {}
 exit 0

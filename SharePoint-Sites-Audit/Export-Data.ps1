@@ -17,7 +17,7 @@ $ErrorActionPreference = "Stop"
 # PS7 guard — this script is launched as a subprocess, so the parent's version check doesn't apply here.
 if ($PSVersionTable.PSVersion.Major -lt 7) {
     Write-Host "  [!] This script requires PowerShell 7 or later. Current: $($PSVersionTable.PSVersion)" -ForegroundColor Red
-    Write-Host "      Install from https://aka.ms/install-powershell and relaunch via 'pwsh'." -ForegroundColor Yellow
+    Write-Host "      Install from https://aka.ms/install-powershell and relaunch via 'pwsh'." -ForegroundColor DarkGray
     exit 1
 }
 
@@ -30,7 +30,7 @@ Write-Host ""
 
 if (-not (Test-Path $ConfigPath)) {
     Write-Host "  [!] Config file not found: $ConfigPath" -ForegroundColor Red
-    Write-Host "      Run first-time setup via SPO-Manager.ps1" -ForegroundColor Yellow
+    Write-Host "      Run first-time setup via SPO-Manager.ps1" -ForegroundColor DarkGray
     exit 1
 }
 if (-not (Test-Path $OutputFolder)) { New-Item -ItemType Directory -Path $OutputFolder -Force | Out-Null }
@@ -251,9 +251,9 @@ $oneDrives   = @($allSites | Where-Object { $_.Template -match 'SPSPERS' -or $_.
 # Sample vs full
 if (-not $FullScan) {
     $nonPersonal = @($nonPersonal | Sort-Object -Property StorageUsageCurrent -Descending | Select-Object -First $SampleSize)
-    Write-Host "        Sampled top $($nonPersonal.Count) sites by storage" -ForegroundColor Yellow
+    Write-Host "        Sampled top $($nonPersonal.Count) sites by storage" -ForegroundColor Cyan
 } else {
-    Write-Host "        Full scan: $($nonPersonal.Count) sites" -ForegroundColor Yellow
+    Write-Host "        Full scan: $($nonPersonal.Count) sites" -ForegroundColor Cyan
 }
 
 # ── Aggregate external user counts via Get-PnPExternalUser (tenant-wide, fast) ──
