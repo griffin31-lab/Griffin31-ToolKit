@@ -55,8 +55,14 @@ Write-Host "  [1/4] Connecting to SharePoint Online (PnP, cert auth — silent).
 Import-Module PnP.PowerShell -ErrorAction Stop
 
 function Connect-PnPWithRetry {
-    $maxAttempts = 5
-    $delays = @(0, 20, 30, 45, 60)  # cumulative wait for cert+consent to propagate
+    # Treat 700016 ("app not found") as a propagation issue for the first ~90s — newly-created
+    # apps commonly take 30-90s before the auth endpoint sees them. After that window, we treat
+    # it as "actually deleted" and the outer handler wipes config and re-runs setup.
+    $maxAttempts    = 5
+    $delays         = @(0, 20, 30, 45, 60)
+    $max700016      = 3   # after 3 attempts (~50s cumulative), stop retrying 700016 and treat as deleted
+    $count700016    = 0
+
     for ($i = 0; $i -lt $maxAttempts; $i++) {
         if ($delays[$i] -gt 0) {
             Write-Host "        Retrying in $($delays[$i])s (attempt $($i+1)/$maxAttempts)..." -ForegroundColor DarkGray
@@ -73,10 +79,12 @@ function Connect-PnPWithRetry {
             return $true
         } catch {
             $msg = $_.Exception.Message
-            # AADSTS700016 = app does not exist. No amount of retrying will fix this.
-            # Throw immediately so the outer handler wipes config and re-triggers setup.
-            if ($msg -match 'AADSTS700016|was not found in the directory') { throw }
-            # Retry only on known cert/consent propagation errors — fast-fail on everything else
+            if ($msg -match 'AADSTS700016|was not found in the directory') {
+                $count700016++
+                if ($count700016 -ge $max700016) { throw }  # app is actually deleted — let outer handler recover
+                Write-Host "        (new app propagation pending — retrying)" -ForegroundColor DarkGray
+                continue
+            }
             if ($msg -match 'AADSTS700027|AADSTS7000215|AADSTS50034|AADSTS500011|AADSTS50105|unauthorized|not registered') {
                 if ($i -eq $maxAttempts - 1) { throw }
                 Write-Host "        (propagation pending — retrying)" -ForegroundColor DarkGray

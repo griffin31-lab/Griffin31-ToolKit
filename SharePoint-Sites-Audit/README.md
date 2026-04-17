@@ -114,6 +114,7 @@ Report includes: posture score hero, KPI row, group-by-finding view (collapsed b
 - **Manual-only items dropped.** Anything not detectable via API (3rd-party backup, Purview DLP policies) is intentionally not covered.
 - **Per-site external user counts** are aggregate (from `Get-PnPExternalUser`), not per-site exact counts — accurate at tenant level, approximate per site.
 - **`tenants/<domain>/config.json` is machine-bound.** The cert password inside is encrypted via `ConvertFrom-SecureString` — DPAPI on Windows, per-user AES on macOS/Linux. You cannot copy the config (or the PFX) between machines or user accounts. On a new machine / user, delete the tenant folder and re-run setup.
+- **Azure AD tokens cache for ~1 hour.** If you delete the Entra app in the portal, the tool may still run successfully for up to an hour afterwards — the previously-issued access token is still cryptographically valid. This is Azure AD behaviour, not a tool bug. After the token expires, the next run detects the missing app and auto-triggers re-setup.
 
 ## Related tools
 
