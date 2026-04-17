@@ -213,31 +213,22 @@ try {
 Write-Host ""
 Write-Host "  [4/4] Fetching M365 groups and Teams (via Graph)..." -ForegroundColor Cyan
 
-# `resourceProvisioningOptions` requires ConsistencyLevel: eventual. To avoid that
-# quirk, fetch groups WITHOUT that field and query /teams separately.
+# `assignedLabels` and `resourceProvisioningOptions` are "advanced query" properties —
+# they require ConsistencyLevel: eventual header + $count=true. One call does both.
+$groupsUri = "https://graph.microsoft.com/v1.0/groups?`$top=999&`$count=true&`$select=id,displayName,mail,mailEnabled,securityEnabled,groupTypes,visibility,resourceProvisioningOptions,assignedLabels,createdDateTime"
 try {
-    $groups = Invoke-GraphPaged "https://graph.microsoft.com/v1.0/groups?`$top=999&`$select=id,displayName,mail,mailEnabled,securityEnabled,groupTypes,visibility,assignedLabels,createdDateTime"
+    $groups = Invoke-GraphPaged -Uri $groupsUri -ExtraHeaders @{ 'ConsistencyLevel' = 'eventual' }
     Write-Host "        Found $($groups.Count) groups" -ForegroundColor Green
 } catch {
     Write-Host "        [!] Groups fetch failed: $($_.Exception.Message)" -ForegroundColor Red
     $groups = @()
 }
 
-# Build a set of team-backed group IDs via /teams
-$teamGroupIds = @{}
-try {
-    $teams = Invoke-GraphPaged "https://graph.microsoft.com/v1.0/teams?`$top=999&`$select=id,displayName"
-    foreach ($t in $teams) { if ($t.id) { $teamGroupIds[[string]$t.id] = $true } }
-    Write-Host "        Found $($teams.Count) team(s)" -ForegroundColor Green
-} catch {
-    Write-Host "        (skip) Teams fetch failed: $($_.Exception.Message)" -ForegroundColor DarkGray
-}
-
 $groupRecords = @()
 $teamRecords  = @()
 foreach ($g in $groups) {
     $isUnified = @($g.groupTypes) -contains 'Unified'
-    $isTeam    = $teamGroupIds.ContainsKey([string]$g.id)
+    $isTeam    = @($g.resourceProvisioningOptions) -contains 'Team'
     $labelIds  = @()
     if ($g.assignedLabels) { $labelIds = @($g.assignedLabels | ForEach-Object { $_.labelId }) }
     $rec = [PSCustomObject]@{
