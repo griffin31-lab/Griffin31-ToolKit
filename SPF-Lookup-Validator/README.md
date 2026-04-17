@@ -1,33 +1,39 @@
 # SPF-Lookup-Validator
 
-## Why this tool?
+> **RFC 7208-compliant SPF chain analysis** — recursively counts DNS lookups against the 10-lookup limit.
 
-SPF records allow **up to 10 DNS lookups** (RFC 7208). Every `include`, `a`, `mx`, `ptr`, `exists`, and `redirect` counts as a lookup — and nested includes add up fast. Exceeding 10 causes a **PermError**, and receiving mail servers will treat your emails as unauthenticated.
+<sub>[← Back to Griffin31 ToolKit](../)</sub>
 
-Most admins add services over time without realizing they've blown past the limit. This tool recursively walks your entire SPF chain and gives you the real count.
+---
 
-**RFC reference:** [RFC 7208 — Sender Policy Framework](https://datatracker.ietf.org/doc/html/rfc7208)
+## What you get
 
-## What it does
-
-- Recursively resolves all SPF includes and redirects
-- Counts actual DNS lookups across the full chain
-- Validates SPF syntax per RFC 7208
-- Warns about deprecated mechanisms (`ptr`), risky qualifiers (`+all`, `?all`), and record length issues
-- Accepts a domain name or a raw SPF string as input
-
-## Requirements
-
-- Bash (Linux / macOS)
-- `dig` (built-in on macOS, `sudo apt install dnsutils` on Debian/Ubuntu)
+- **Real DNS lookup count** across the full include chain
+- **Warnings** for deprecated mechanisms (`ptr`), risky qualifiers (`+all`, `?all`), record length issues
+- **Full include tree** showing nested SPF resolution
+- **Syntax validation** per RFC 7208
+- **Accepts domain OR raw SPF string** as input
 
 ## Quick start
 
 ```bash
 chmod +x spf.sh
 ./spf.sh
-# Enter a domain (e.g. yourdomain.com) or a full SPF record
+# Enter a domain (e.g. yourdomain.com) or paste a full SPF record
 ```
+
+## Why this tool?
+
+SPF records allow **up to 10 DNS lookups** (RFC 7208). Every `include`, `a`, `mx`, `ptr`, `exists`, and `redirect` counts as a lookup — and nested includes add up fast. Exceeding 10 causes **PermError**, and receiving mail servers treat your email as unauthenticated.
+
+Most admins add services over time without realizing they've blown past the limit. This tool walks the full chain and gives you the real count.
+
+Reference: [RFC 7208 — Sender Policy Framework](https://datatracker.ietf.org/doc/html/rfc7208)
+
+## Requirements
+
+- Bash (macOS / Linux)
+- `dig` — built-in on macOS; `sudo apt install dnsutils` on Debian/Ubuntu
 
 ## Files
 
@@ -35,3 +41,7 @@ chmod +x spf.sh
 |------|---------|
 | `spf.sh` | Main script |
 | `examples.txt` | Sample SPF records to test with |
+
+## Related tools
+
+Any email-security gap surfaced here often pairs with DMARC + DKIM issues — those are worth checking in MXToolbox or a dedicated email-auth tool after you've cleaned up SPF.

@@ -1,14 +1,38 @@
 # SharePoint-Sites-Audit
 
-## Why this tool?
+> **Find the risky sites, OneDrives, groups, and teams** — 14 per-entity security checks, self-contained HTML report with drill-down findings.
 
-The SharePoint admin center shows you aggregate numbers — 4,200 sites, 18,000 external shares — but not *which specific sites* are the problem. Finding the 12 publicly-shared sites hiding in a 4,000-site tenant, or the Teams missing sensitivity labels, takes hours of clicking.
+<sub>[← Back to Griffin31 ToolKit](../)</sub>
 
-This tool iterates every site, OneDrive, M365 group, and Team, runs 14 API-detectable security checks against each one, and produces a self-contained HTML report with a ranked list of entities to fix. Scan defaults to the top 100 sites by storage; full-tenant scan is opt-in.
+<p align="center">
+  <img src="../.github/screenshots/sharepoint-sites-audit.png" alt="SharePoint-Sites-Audit report — posture score, KPI row, group-by-finding view" width="100%"/>
+</p>
+
+---
+
+## What you get
+
+- **Tenant SharePoint posture score** (0-100), storage-weighted across entities
+- **14 per-entity security checks** — public sharing, anonymous access, excessive external users, inactive sites, missing sensitivity labels, and more
+- **Two views in one report** — group by finding type (what problem affects how many?) or group by entity (what's wrong with this site?)
+- **Entity table with filters** by type — Sites / OneDrive / Groups / Teams
+- **Admin portal deep-links** per entity (plus a secondary link to the entity itself)
+- **Cross-platform** — runs on Windows, macOS, Linux
+- **Silent subsequent runs** — cert-based app-only auth after one-time setup
+
+## Quick start
+
+```powershell
+pwsh ./SPO-Manager.ps1
+```
+
+First run: tool auto-triggers setup (Global Admin consent → cert generation → done in ~30s). Every subsequent run: silent cert auth, no prompts.
+
+Menu: (1) Export only — (2) Analyze existing data — (3) Full pipeline Sample (top 100 sites) — (4) Full scan all sites.
 
 ## What it checks
 
-Per-entity, per-API. Fourteen checks covering four entity types:
+14 API-detectable checks. Anything not detectable via API is intentionally dropped — no "review required" placeholders.
 
 **Sites (8 checks)**
 - Publicly accessible sites (Anyone-link sharing enabled)
@@ -16,9 +40,9 @@ Per-entity, per-API. Fourteen checks covering four entity types:
 - Excessive external users on a site
 - Site sharing more permissive than tenant baseline
 - Inactive sites (no content changes > 365 days)
-- Single-owner or no-owner sites
+- Sites with missing or system-only admin
 - Site missing a sensitivity label
-- Site access granted via direct users rather than groups
+- External users on non-group sites (likely direct grants)
 
 **OneDrive (2 checks)**
 - OneDrive accounts with excessive external sharing
@@ -27,86 +51,70 @@ Per-entity, per-API. Fourteen checks covering four entity types:
 **Groups / Teams (3 checks)**
 - M365 group missing sensitivity label
 - Team missing sensitivity label
-- Group with guest members and no sensitivity label
+- Group or team with guest members and no sensitivity label
 
 **Document libraries (1 check)**
 - Default sensitivity label not configured on library
 
+## Why this tool?
+
+The SharePoint admin center shows you aggregate numbers — 4,200 sites, 18,000 external shares — but not *which specific sites* are the problem. Finding the 12 publicly-shared sites hiding in a 4,000-site tenant, or the Teams missing sensitivity labels, takes hours of clicking.
+
+This tool iterates every site, OneDrive, M365 group, and Team, runs 14 API-detectable security checks, and produces a ranked HTML report. Sample mode scans the top 100 sites by storage in under 3 minutes; full-scan mode iterates every site.
+
 ## Requirements
 
 - PowerShell 7.x (Windows, macOS, or Linux)
-- `PnP.PowerShell` module (auto-installs if missing) — cross-platform, modern auth
-- `Microsoft.Graph` module (auto-installs if missing)
-- **Role**: SharePoint Administrator minimum
-- **Graph scopes**: `Group.Read.All`, `Directory.Read.All`, `InformationProtectionPolicy.Read`
+- `PnP.PowerShell` module — auto-installs if missing (cross-platform, modern auth)
+- `Microsoft.Graph` module — auto-installs if missing
+- **Role**: Global Administrator ONCE (first-run setup); SharePoint Administrator for subsequent runs
 
-### First-time setup (auto, ONCE per tenant)
+## First-time setup (auto, once per tenant)
 
-The tool registers its own Entra ID app on first run — no manual portal work. Pick any menu option (1-5) and if the tenant isn't set up yet, the tool will:
+On first run the tool registers its own Entra ID app — no manual portal work. It prompts you to sign in as Global Admin, generates a self-signed certificate on your machine, creates the app via Graph API, uploads the cert's public key, and grants app-only permissions. Config (ClientId + cert + encrypted password) is saved to `tenants/<domain>/config.json`.
 
-1. Prompt you to sign in as **Global Administrator** (browser opens)
-2. Ask for an app name (default: `Griffin31 SPO Audit`)
-3. Create the Entra app
-4. Generate a self-signed certificate on this machine
-5. Upload the cert's public key to the app
-6. Grant app-only permissions (SharePoint + Graph)
-7. Save config (ClientId + cert path + encrypted cert password) to `tenants/<domain>/config.json`
+**Every subsequent run is silent** — cert auto-authenticates. No browser, no sign-in prompt, no client secret.
 
-**Every subsequent run is silent** — the cert auto-authenticates. No browser, no sign-in prompt, no client secret.
+<details>
+<summary>App-only permissions requested (click to expand)</summary>
 
-App-only permissions requested:
-- Graph (Application): `Group.Read.All`, `Directory.Read.All`, `InformationProtectionPolicy.Read.All`, `Sites.Read.All`
+- Microsoft Graph (Application): `Group.Read.All`, `Directory.Read.All`, `InformationProtectionPolicy.Read.All`, `Sites.Read.All`
 - SharePoint (Application): `Sites.FullControl.All`, `User.Read.All`
 
-If consent fails because your tenant blocks user-initiated app registrations, ask a Global Admin to run the tool once (just pick menu option 1 and approve when prompted).
+</details>
 
 ## How it works
 
-The pipeline runs four stages, each writing JSON to `tenants/<domain>/data/`:
+Pipeline runs six stages, each writing JSON to `tenants/<domain>/data/`:
 
-1. **Export-Data** — connects to SPO + Graph, pulls site list, OneDrive accounts, groups, teams, assigned labels
-2. **Analyze-Sites** — runs the 8 per-site checks; writes `site-findings.json`
-3. **Analyze-OneDrive** — runs the 2 per-OneDrive checks; writes `onedrive-findings.json`
-4. **Analyze-GroupsTeams** — runs the 4 per-group/team/library checks; writes `group-findings.json`
-5. **Analyze-KeyInsights** — computes per-entity scores + tenant roll-up; writes `key-insights.json`
-6. **Generate-Report** — produces HTML
-
-Finally, the HTML report includes:
-- Tenant posture score (weighted average by entity storage size)
-- KPI row (total entities, entities with findings, High/Medium/Low counts)
-- Entity table (DataTables — sort/filter/search) with expandable rows showing per-entity findings
-- Filter by entity type: Site / OneDrive / Group / Team
-- Direct deep-links to each entity in the SharePoint admin center
+1. **Export-Data** — pulls sites, OneDrive accounts, groups, teams, labels (PnP + Graph)
+2. **Analyze-Sites** — 8 per-site checks
+3. **Analyze-OneDrive** — 2 per-OneDrive checks
+4. **Analyze-GroupsTeams** — 3 per-group/team checks
+5. **Analyze-KeyInsights** — per-entity scores + tenant roll-up
+6. **Generate-Report** — self-contained HTML
 
 ## Output
 
-- `tenants/<domain>/data/` — JSON exports (one file per stage)
-- `tenants/<domain>/reports/SP_Sites_Audit_<timestamp>.html` — the final report
+- `tenants/<domain>/data/` — JSON per stage
+- `tenants/<domain>/reports/SP_Sites_Audit_<timestamp>.html` — the report
 
-## Run modes
-
-The interactive menu offers:
-
-1. **Export data only** — fetch and store, no analysis
-2. **Analyze existing data** — re-run analysis against a prior export
-3. **Full pipeline (default: Sample mode)** — top 100 sites by storage + all OneDrives/groups/teams
-4. **Full pipeline (Full scan)** — every site. Can take 20-40 minutes on 10k+ site tenants.
-
-## Usage
-
-```powershell
-pwsh ./SPO-Manager.ps1
-```
+Report includes: posture score hero, KPI row, group-by-finding view (collapsed by default — click to expand affected entities), group-by-entity table (DataTables with filters), admin-portal deep-links.
 
 ## Safety
 
-- **Audit-only.** No remediation. No changes made to your tenant.
-- **Read-only Graph scopes.** No `.ReadWrite.` permissions requested.
+- **Audit-only.** No remediation, no writes.
+- **Read scopes only** plus SharePoint `Sites.FullControl.All` (PnP needs it to query site sharing caps — still read-only in practice).
 - **No telemetry.** Data stays on your machine.
-- **Tenant data gitignored.** The `tenants/` folder is excluded from version control by default.
+- **Tenant folder gitignored.**
 
 ## Honest limitations
 
-- **SPO module is Windows-first.** On macOS it works but has device-login quirks. Graph fallbacks preferred where available.
-- **Tenant-level config checks out of scope.** For SharePoint tenant-wide settings (custom scripting, default link type, DLP, retention) use the SharePoint admin center or a future dedicated tool.
-- **Manual-only items dropped.** Anything not detectable via API (e.g., 3rd-party backup, Purview DLP policies) is intentionally not in this tool's scope.
+- **Tenant-level config out of scope.** For tenant-wide settings (custom scripting, default link type, DLP, retention) use the SharePoint admin center.
+- **Manual-only items dropped.** Anything not detectable via API (3rd-party backup, Purview DLP policies) is intentionally not covered.
+- **Per-site external user counts** are aggregate (from `Get-PnPExternalUser`), not per-site exact counts — accurate at tenant level, approximate per site.
+
+## Related tools
+
+- [Entra-AppCredentials-Audit](../Entra-AppCredentials-Audit/) — audit apps that may access SharePoint
+- [CA-Policy-Analyzer](../CA-Policy-Analyzer/) — companion posture report for Conditional Access
