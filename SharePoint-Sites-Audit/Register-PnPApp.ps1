@@ -104,10 +104,13 @@ try {
     } else {
         # macOS / Linux: use .NET APIs directly (no cert store needed for PFX generation)
         $rsa = [System.Security.Cryptography.RSA]::Create(2048)
-        $req = New-Object System.Security.Cryptography.X509Certificates.CertificateRequest `
-                    $certSubject, $rsa, 'SHA256', 'Pkcs1'
-        $cert = $req.CreateSelfSigned((Get-Date).AddMinutes(-5), $notAfter)
-        $pfxBytes = $cert.Export('Pkcs12', $plainPassword)
+        $hashAlg = [System.Security.Cryptography.HashAlgorithmName]::SHA256
+        $padding = [System.Security.Cryptography.RSASignaturePadding]::Pkcs1
+        $req = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new($certSubject, $rsa, $hashAlg, $padding)
+        $notBefore = [System.DateTimeOffset]::UtcNow.AddMinutes(-5)
+        $notAfterOffset = [System.DateTimeOffset]::new($notAfter.ToUniversalTime())
+        $cert = $req.CreateSelfSigned($notBefore, $notAfterOffset)
+        $pfxBytes = $cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Pkcs12, $plainPassword)
         $pfxPath = Join-Path $certDir "$($ApplicationName -replace '[^\w\-]','_').pfx"
         [System.IO.File]::WriteAllBytes($pfxPath, $pfxBytes)
     }
