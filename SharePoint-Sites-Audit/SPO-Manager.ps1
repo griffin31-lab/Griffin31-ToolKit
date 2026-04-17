@@ -238,9 +238,15 @@ function Invoke-DataExport {
   }
 
   try {
+    # Require PS7 for the spawned subprocess — sub-scripts use cross-platform APIs that don't exist in Windows PS 5.1
     $pwshCmd = (Get-Command pwsh -ErrorAction SilentlyContinue).Source
-    if (-not $pwshCmd) { $pwshCmd = (Get-Command powershell -ErrorAction SilentlyContinue).Source }
-    if (-not $pwshCmd) { throw "PowerShell not found." }
+    if (-not $pwshCmd) {
+      Write-ColorText "`n[!] 'pwsh' (PowerShell 7) not found on PATH. This tool requires PS7." -Color Red
+      Write-ColorText "    Install from https://aka.ms/install-powershell" -Color Yellow
+      Write-ColorText "`nPress any key..." -Color Gray
+      $null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+      return $false
+    }
 
     $pwshArgs = @(
       '-NoProfile', '-ExecutionPolicy', 'Bypass',

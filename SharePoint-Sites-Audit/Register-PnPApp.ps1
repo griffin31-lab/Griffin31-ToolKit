@@ -90,7 +90,7 @@ $notAfter    = (Get-Date).AddYears(2)
 
 try {
     if ($IsWindows -or $env:OS -match 'Windows') {
-        # Windows: use New-SelfSignedCertificate (CurrentUser\My, then export PFX)
+        # Windows: use New-SelfSignedCertificate (CurrentUser\My, then export PFX, then clean up)
         $cert = New-SelfSignedCertificate -Subject $certSubject `
                     -CertStoreLocation "Cert:\CurrentUser\My" `
                     -KeyExportPolicy Exportable `
@@ -101,6 +101,8 @@ try {
                     -Provider "Microsoft Enhanced RSA and AES Cryptographic Provider"
         $pfxPath = Join-Path $certDir "$($ApplicationName -replace '[^\w\-]','_').pfx"
         Export-PfxCertificate -Cert "Cert:\CurrentUser\My\$($cert.Thumbprint)" -FilePath $pfxPath -Password $securePassword | Out-Null
+        # Remove from Windows cert store — the PFX on disk is the canonical copy (match macOS behaviour)
+        try { Remove-Item -Path "Cert:\CurrentUser\My\$($cert.Thumbprint)" -DeleteKey -ErrorAction SilentlyContinue } catch {}
     } else {
         # macOS / Linux: use .NET APIs directly (no cert store needed for PFX generation)
         $rsa = [System.Security.Cryptography.RSA]::Create(2048)

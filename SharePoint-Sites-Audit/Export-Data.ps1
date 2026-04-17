@@ -14,6 +14,13 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# PS7 guard — this script is launched as a subprocess, so the parent's version check doesn't apply here.
+if ($PSVersionTable.PSVersion.Major -lt 7) {
+    Write-Host "  [!] This script requires PowerShell 7 or later. Current: $($PSVersionTable.PSVersion)" -ForegroundColor Red
+    Write-Host "      Install from https://aka.ms/install-powershell and relaunch via 'pwsh'." -ForegroundColor Yellow
+    exit 1
+}
+
 Write-Host ""
 Write-Host "  SharePoint Sites Audit — Data Export (PnP + Graph, app-only cert auth)" -ForegroundColor Cyan
 Write-Host "  Tenant:     $TenantDomain" -ForegroundColor Gray
@@ -73,8 +80,12 @@ try {
 Write-Host ""
 Write-Host "  [2/4] Obtaining Graph token via PnP (cert auth — silent)..." -ForegroundColor Cyan
 try {
-    $script:graphToken = Get-PnPAccessToken -ResourceTypeName Graph -ErrorAction Stop
-    Write-Host "        Graph token acquired" -ForegroundColor Green
+    # Force [string] — some PnP builds return a non-string object which would serialize as "System.Object[]" in the Bearer header.
+    $script:graphToken = [string](Get-PnPAccessToken -ResourceTypeName Graph -ErrorAction Stop)
+    if (-not $script:graphToken -or $script:graphToken -notmatch '^[A-Za-z0-9._-]{100,}$') {
+        throw "Invalid Graph token format (length $($script:graphToken.Length))."
+    }
+    Write-Host "        Graph token acquired (length $($script:graphToken.Length))" -ForegroundColor Green
 } catch {
     Write-Host "        [!] Failed to obtain Graph token: $($_.Exception.Message)" -ForegroundColor Red
     try { Disconnect-PnPOnline -ErrorAction SilentlyContinue } catch {}

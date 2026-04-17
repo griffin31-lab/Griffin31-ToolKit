@@ -4,6 +4,12 @@ param(
     [string]$ReportsDir = "reports"
 )
 
+# PS7 guard
+if ($PSVersionTable.PSVersion.Major -lt 7) {
+    Write-Host "  [!] This script requires PowerShell 7 or later." -ForegroundColor Red
+    exit 1
+}
+
 # Orchestrator: runs all analysis modules against a data export, then generates the HTML report.
 Write-Host "Starting SharePoint Sites Audit..." -ForegroundColor Green
 
