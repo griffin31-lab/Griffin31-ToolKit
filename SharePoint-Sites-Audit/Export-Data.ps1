@@ -50,17 +50,42 @@ if (-not (Test-Path $certPath)) {
 
 $securePw = $encryptedPw | ConvertTo-SecureString
 
-# ── Phase 1: Connect to SharePoint via PnP (cert-based, silent) ──
+# ── Phase 1: Connect to SharePoint via PnP (cert-based, silent, with propagation retry) ──
 Write-Host "  [1/4] Connecting to SharePoint Online (PnP, cert auth — silent)..." -ForegroundColor Cyan
+Import-Module PnP.PowerShell -ErrorAction Stop
+
+function Connect-PnPWithRetry {
+    $maxAttempts = 5
+    $delays = @(0, 20, 30, 45, 60)  # cumulative wait for cert+consent to propagate
+    for ($i = 0; $i -lt $maxAttempts; $i++) {
+        if ($delays[$i] -gt 0) {
+            Write-Host "        Retrying in $($delays[$i])s (attempt $($i+1)/$maxAttempts)..." -ForegroundColor DarkGray
+            Start-Sleep -Seconds $delays[$i]
+        }
+        try {
+            Connect-PnPOnline `
+                -Url $SpoAdminUrl `
+                -ClientId $clientId `
+                -Tenant $TenantDomain `
+                -CertificatePath $certPath `
+                -CertificatePassword $securePw `
+                -ErrorAction Stop
+            return $true
+        } catch {
+            $msg = $_.Exception.Message
+            # Retry only on known propagation errors — fast-fail on everything else
+            if ($msg -match 'AADSTS700027|AADSTS7000215|AADSTS50034|AADSTS500011|AADSTS50105|unauthorized|not registered|not found in the directory|AADSTS700016') {
+                if ($i -eq $maxAttempts - 1) { throw }
+                Write-Host "        (propagation pending — $($msg.Substring(0, [Math]::Min(80, $msg.Length)))...)" -ForegroundColor DarkGray
+                continue
+            }
+            throw
+        }
+    }
+}
+
 try {
-    Import-Module PnP.PowerShell -ErrorAction Stop
-    Connect-PnPOnline `
-        -Url $SpoAdminUrl `
-        -ClientId $clientId `
-        -Tenant $TenantDomain `
-        -CertificatePath $certPath `
-        -CertificatePassword $securePw `
-        -ErrorAction Stop
+    Connect-PnPWithRetry | Out-Null
     Write-Host "        Connected to $SpoAdminUrl" -ForegroundColor Green
 } catch {
     $errMsg = $_.Exception.Message
@@ -104,15 +129,39 @@ try {
 # and call Graph via Invoke-RestMethod using a token minted by PnP.
 Write-Host ""
 Write-Host "  [2/4] Obtaining Graph token via PnP (cert auth — silent)..." -ForegroundColor Cyan
-try {
-    # Force [string] — some PnP builds return a non-string object which would serialize as "System.Object[]" in the Bearer header.
-    $script:graphToken = [string](Get-PnPAccessToken -ResourceTypeName Graph -ErrorAction Stop)
-    if (-not $script:graphToken -or $script:graphToken -notmatch '^[A-Za-z0-9._-]{100,}$') {
-        throw "Invalid Graph token format (length $($script:graphToken.Length))."
+
+function Get-GraphTokenWithRetry {
+    $maxAttempts = 5
+    $delays = @(0, 20, 30, 45, 60)
+    for ($i = 0; $i -lt $maxAttempts; $i++) {
+        if ($delays[$i] -gt 0) {
+            Write-Host "        Retrying in $($delays[$i])s (attempt $($i+1)/$maxAttempts)..." -ForegroundColor DarkGray
+            Start-Sleep -Seconds $delays[$i]
+        }
+        try {
+            $t = [string](Get-PnPAccessToken -ResourceTypeName Graph -ErrorAction Stop)
+            if (-not $t -or $t -notmatch '^[A-Za-z0-9._-]{100,}$') {
+                throw "Invalid Graph token format."
+            }
+            return $t
+        } catch {
+            $msg = $_.Exception.Message
+            if ($msg -match 'AADSTS700027|AADSTS7000215|AADSTS50034|AADSTS500011|AADSTS50105|not registered|invalid_client') {
+                if ($i -eq $maxAttempts - 1) { throw }
+                Write-Host "        (cert/consent propagation pending — retrying)" -ForegroundColor DarkGray
+                continue
+            }
+            throw
+        }
     }
+}
+
+try {
+    $script:graphToken = Get-GraphTokenWithRetry
     Write-Host "        Graph token acquired (length $($script:graphToken.Length))" -ForegroundColor Green
 } catch {
-    Write-Host "        [!] Failed to obtain Graph token: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "        [!] Failed to obtain Graph token after retries: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "            Cert propagation to Graph can occasionally exceed 3 minutes. Wait and re-run the same menu option." -ForegroundColor Yellow
     try { Disconnect-PnPOnline -ErrorAction SilentlyContinue } catch {}
     exit 1
 }
