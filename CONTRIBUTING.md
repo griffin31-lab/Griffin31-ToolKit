@@ -17,4 +17,4 @@ Thanks for your interest in Griffin31 ToolKit!
 
 ## Questions?
 
-Use the [Discussions](https://github.com/oncld-mng/Griffin31-ToolKit/discussions) tab.
+Use the [Discussions](https://github.com/griffin31-lab/Griffin31-ToolKit/discussions) tab.

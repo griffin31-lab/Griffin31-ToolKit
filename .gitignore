@@ -3,9 +3,12 @@
 Thumbs.db
 Desktop.ini
 
-# Editor / IDE
+# Editor / IDE / AI assistants
 .vscode/
 .idea/
+.claude/
+.cursor/
+.aider*
 *.swp
 *.swo
 *~
