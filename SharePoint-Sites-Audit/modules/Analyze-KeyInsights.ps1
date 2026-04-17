@@ -49,6 +49,7 @@ foreach ($e in @($siteFindings.Findings)) {
         EntityId    = $e.EntityId
         EntityName  = $e.EntityName
         EntityUrl   = $e.EntityUrl
+        AdminUrl    = $e.AdminUrl
         StorageBytes = $e.StorageBytes
         Score       = (Get-EntityScore $e)
         Findings    = $e.Findings
@@ -62,6 +63,7 @@ foreach ($e in @($onedriveFindings.Findings)) {
         EntityId    = $e.EntityId
         EntityName  = $e.EntityName
         EntityUrl   = $e.EntityUrl
+        AdminUrl    = $e.AdminUrl
         StorageBytes = $e.StorageBytes
         Score       = (Get-EntityScore $e)
         Findings    = $e.Findings
@@ -75,6 +77,7 @@ foreach ($e in @($groupFindings.Findings)) {
         EntityId    = $e.EntityId
         EntityName  = $e.EntityName
         EntityUrl   = $e.EntityUrl
+        AdminUrl    = $e.AdminUrl
         StorageBytes = 0
         Score       = (Get-EntityScore $e)
         Findings    = $e.Findings

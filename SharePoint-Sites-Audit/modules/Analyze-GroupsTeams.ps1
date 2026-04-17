@@ -42,6 +42,7 @@ foreach ($g in @($groups)) {
             EntityId      = $g.Id
             EntityName    = $g.DisplayName
             EntityUrl     = "https://admin.microsoft.com/adminportal/home#/groups/:/GroupDetailsV3/$($g.Id)/General"
+            AdminUrl      = "https://admin.microsoft.com/adminportal/home#/groups/:/GroupDetailsV3/$($g.Id)/General"
             GuestCount    = $g.GuestCount
             MemberCount   = $g.MemberCount
             Visibility    = $g.Visibility
@@ -77,6 +78,7 @@ foreach ($t in @($teams)) {
             EntityId      = $t.Id
             EntityName    = $t.DisplayName
             EntityUrl     = "https://admin.microsoft.com/adminportal/home#/groups/:/GroupDetailsV3/$($t.Id)/General"
+            AdminUrl      = "https://admin.microsoft.com/adminportal/home#/groups/:/GroupDetailsV3/$($t.Id)/General"
             GuestCount    = $t.GuestCount
             MemberCount   = $t.MemberCount
             Visibility    = $t.Visibility

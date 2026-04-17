@@ -90,14 +90,23 @@ function FormatBytes($b) {
 
 $bandColor = BandColor $tenantBand
 
-# ── Build entity rows (details stored in hidden <template>, revealed via DataTables child-row API) ──
+# ── Build entity rows + per-type counts + grouped-by-finding view ──
 $entityRowsHtml = ""
 $detailsMapJson = ""
 $idx = 0
 $detailsMap = @{}
+
+# Per-filter counts
+$typeCounts = @{ 'Site' = 0; 'OneDrive' = 0; 'Group' = 0; 'Team' = 0 }
+
+# Flat list of (finding + its entity) for the grouped-by-finding view
+$flatFindings = @()
+
 if ($insights -and $insights.Entities) {
     foreach ($e in $insights.Entities) {
         $idx++
+        if ($typeCounts.ContainsKey($e.EntityType)) { $typeCounts[$e.EntityType]++ }
+
         $findingsList = ""
         foreach ($f in @($e.Findings)) {
             $findingsList += @"
@@ -107,6 +116,17 @@ if ($insights -and $insights.Entities) {
   <div class='finding-rem'><strong>Remediation:</strong> $(HtmlEncode $f.Remediation)</div>
 </div>
 "@
+            $flatFindings += [PSCustomObject]@{
+                FindingId   = $f.Id
+                Title       = $f.Title
+                Severity    = $f.Severity
+                Remediation = $f.Remediation
+                EntityName  = $e.EntityName
+                EntityType  = $e.EntityType
+                EntityUrl   = $e.EntityUrl
+                AdminUrl    = $e.AdminUrl
+                Details     = $f.Details
+            }
         }
         $detailsMap["row-$idx"] = $findingsList
 
@@ -122,12 +142,17 @@ if ($insights -and $insights.Entities) {
         }
 
         $issueCount = @($e.Findings).Count
-        $entityLink = if ($e.EntityUrl) { "<a href='$(HtmlEncode $e.EntityUrl)' target='_blank' rel='noopener'>$(HtmlEncode $e.EntityName)</a>" } else { HtmlEncode $e.EntityName }
+
+        # Primary link: admin portal (where admin can actually act). Secondary chip: the site URL.
+        $primary = if ($e.AdminUrl) { "<a href='$(HtmlEncode $e.AdminUrl)' target='_blank' rel='noopener'>$(HtmlEncode $e.EntityName)</a>" } else { HtmlEncode $e.EntityName }
+        $siteChip = if ($e.EntityUrl -and $e.EntityUrl -ne $e.AdminUrl) {
+            "<a class='site-link-chip' href='$(HtmlEncode $e.EntityUrl)' target='_blank' rel='noopener' title='Open site'>open site</a>"
+        } else { "" }
 
         $entityRowsHtml += @"
 <tr data-entity-type='$(HtmlEncode $e.EntityType)' data-details-key='row-$idx'>
   <td class='col-type'>$(EntityTypeBadge $e.EntityType)</td>
-  <td class='col-name'>$entityLink<div class='meta-row'>$metaChips</div></td>
+  <td class='col-name'>$primary $siteChip<div class='meta-row'>$metaChips</div></td>
   <td class='col-score'>$(ScoreBadge $e.Score)</td>
   <td class='col-issues'>$issueCount</td>
   <td class='col-expand'><button class='expand-btn' aria-label='Expand details' type='button'>+</button></td>
@@ -139,6 +164,47 @@ if ($insights -and $insights.Entities) {
     $entityRowsHtml = "<tr><td colspan='5' class='empty'>No entities with findings.</td></tr>"
     $detailsMapJson = "{}"
 }
+
+# ── Build "Group by finding type" view ──
+$groupedHtml = ""
+if ($flatFindings.Count -gt 0) {
+    $byFinding = $flatFindings | Group-Object -Property FindingId | Sort-Object -Property @{Expression={
+        switch (($_.Group[0]).Severity) { 'High' {0} 'Medium' {1} 'Low' {2} default {3} }
+    }}, Name
+    foreach ($grp in $byFinding) {
+        $first = $grp.Group[0]
+        $sevColor = switch ($first.Severity) { 'High' { '#B91C1C' } 'Medium' { '#D97706' } default { '#2563EB' } }
+        $entitiesList = ""
+        foreach ($item in $grp.Group) {
+            $itemLink = if ($item.AdminUrl) { "<a href='$(HtmlEncode $item.AdminUrl)' target='_blank' rel='noopener'>$(HtmlEncode $item.EntityName)</a>" } else { HtmlEncode $item.EntityName }
+            $typePill = EntityTypeBadge $item.EntityType
+            $siteSecondary = if ($item.EntityUrl -and $item.EntityUrl -ne $item.AdminUrl) {
+                "<a class='site-link-chip' href='$(HtmlEncode $item.EntityUrl)' target='_blank' rel='noopener'>open site</a>"
+            } else { "" }
+            $entitiesList += "<li>$typePill $itemLink $siteSecondary<div class='group-details'>$(HtmlEncode $item.Details)</div></li>"
+        }
+        $groupedHtml += @"
+<div class='grouped-finding' style='border-left-color:$sevColor'>
+  <div class='grouped-head'>
+    $(SeverityPill $first.Severity)
+    <span class='finding-id'>$(HtmlEncode $first.FindingId)</span>
+    <span class='grouped-title'>$(HtmlEncode $first.Title)</span>
+    <span class='grouped-count'>$($grp.Count) affected</span>
+  </div>
+  <div class='grouped-rem'><strong>Remediation:</strong> $(HtmlEncode $first.Remediation)</div>
+  <ul class='grouped-entities'>$entitiesList</ul>
+</div>
+"@
+    }
+} else {
+    $groupedHtml = "<p class='empty'>No findings.</p>"
+}
+
+$siteCount = $typeCounts['Site']
+$onedriveCount = $typeCounts['OneDrive']
+$groupCount = $typeCounts['Group']
+$teamCount = $typeCounts['Team']
+$totalCount = $siteCount + $onedriveCount + $groupCount + $teamCount
 
 # ── Assemble full HTML ──
 $html = @"
@@ -254,15 +320,66 @@ $html = @"
   .kpi.high .kpi-value { color: #B91C1C; }
   .kpi.med  .kpi-value { color: #D97706; }
 
+  /* View toggle (grouped-by-finding vs grouped-by-entity) */
+  .view-toggle { display: flex; gap: 2px; border-bottom: 2px solid var(--border); margin-bottom: 20px; }
+  .view-btn {
+    background: transparent; border: none; padding: 10px 20px;
+    font-family: inherit; font-size: 14px; font-weight: 600;
+    color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent;
+    margin-bottom: -2px; transition: color 150ms, border-color 150ms;
+  }
+  .view-btn:hover { color: var(--text); }
+  .view-btn.active { color: var(--navy); border-bottom-color: var(--accent); }
+  .view-panel[hidden] { display: none; }
+
   /* Filter buttons */
   .filter-bar { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
   .filter-btn {
     background: white; border: 1px solid var(--border); border-radius: 6px;
     padding: 8px 14px; font-family: inherit; font-size: 13px; font-weight: 600;
     color: var(--muted); cursor: pointer; transition: all 150ms;
+    display: inline-flex; align-items: center; gap: 6px;
   }
   .filter-btn:hover { border-color: var(--accent); color: var(--text); }
   .filter-btn.active { background: var(--navy); color: white; border-color: var(--navy); }
+  .chip-count {
+    display: inline-block; background: var(--border); color: var(--muted);
+    font-size: 10px; padding: 1px 8px; border-radius: 10px; font-weight: 700;
+    font-family: 'IBM Plex Mono', monospace;
+  }
+  .filter-btn.active .chip-count { background: var(--accent); color: white; }
+
+  /* Group-by-finding cards */
+  .grouped-finding {
+    background: white; border-left: 4px solid #2563EB;
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 14px 18px; margin-bottom: 12px;
+  }
+  .grouped-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+  .grouped-title { font-size: 15px; font-weight: 600; color: var(--navy); }
+  .grouped-count {
+    margin-left: auto;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px; color: var(--muted);
+    background: var(--bg); padding: 2px 8px; border-radius: 4px;
+  }
+  .grouped-rem { font-size: 13px; margin: 4px 0 8px 0; color: var(--text); }
+  .grouped-entities { list-style: none; padding: 0; margin: 0; }
+  .grouped-entities li {
+    padding: 8px 10px; border-top: 1px solid var(--border);
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline;
+  }
+  .group-details { flex-basis: 100%; font-size: 12px; color: var(--muted); margin-top: 2px; margin-left: 8px; }
+
+  .site-link-chip {
+    display: inline-block;
+    background: var(--bg); border: 1px solid var(--border);
+    color: var(--muted) !important;
+    font-size: 10px; padding: 1px 8px; border-radius: 3px;
+    font-family: 'IBM Plex Mono', monospace;
+    text-decoration: none !important;
+  }
+  .site-link-chip:hover { border-color: var(--accent); color: var(--accent) !important; }
 
   /* Entity table */
   table.entities {
@@ -385,29 +502,43 @@ $html = @"
     </div>
   </section>
 
-  <section id='entities'>
-    <h2>Entities &amp; findings</h2>
-    <div class='filter-bar' role='tablist' aria-label='Filter by entity type'>
-      <button class='filter-btn active' data-filter='all' aria-pressed='true'>All</button>
-      <button class='filter-btn' data-filter='Site'>Sites</button>
-      <button class='filter-btn' data-filter='OneDrive'>OneDrive</button>
-      <button class='filter-btn' data-filter='Group'>Groups</button>
-      <button class='filter-btn' data-filter='Team'>Teams</button>
+  <section id='findings'>
+    <h2>Findings &amp; affected entities</h2>
+
+    <div class='view-toggle' role='tablist' aria-label='Report view'>
+      <button class='view-btn active' data-view='grouped' aria-pressed='true'>Group by finding</button>
+      <button class='view-btn' data-view='entity' aria-pressed='false'>Group by entity</button>
     </div>
-    <table id='entityTable' class='entities'>
-      <thead>
-        <tr>
-          <th>Type</th>
-          <th>Name</th>
-          <th>Score</th>
-          <th>Issues</th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody>
-        $entityRowsHtml
-      </tbody>
-    </table>
+
+    <!-- GROUP BY FINDING VIEW -->
+    <div id='view-grouped' class='view-panel'>
+      $groupedHtml
+    </div>
+
+    <!-- GROUP BY ENTITY VIEW -->
+    <div id='view-entity' class='view-panel' hidden>
+      <div class='filter-bar' role='tablist' aria-label='Filter by entity type'>
+        <button class='filter-btn active' data-filter='all' aria-pressed='true'>All <span class='chip-count'>$totalCount</span></button>
+        <button class='filter-btn' data-filter='Site'>Sites <span class='chip-count'>$siteCount</span></button>
+        <button class='filter-btn' data-filter='OneDrive'>OneDrive <span class='chip-count'>$onedriveCount</span></button>
+        <button class='filter-btn' data-filter='Group'>Groups <span class='chip-count'>$groupCount</span></button>
+        <button class='filter-btn' data-filter='Team'>Teams <span class='chip-count'>$teamCount</span></button>
+      </div>
+      <table id='entityTable' class='entities'>
+        <thead>
+          <tr>
+            <th>Type</th>
+            <th>Name</th>
+            <th>Score</th>
+            <th>Issues</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          $entityRowsHtml
+        </tbody>
+      </table>
+    </div>
   </section>
 
 </main>
@@ -425,7 +556,16 @@ $html = @"
       ]
     });
 
-    // Expand / collapse using DataTables child-row API
+    // Custom filter — match on data-entity-type attribute on the <tr>
+    var currentTypeFilter = 'all';
+    `$.fn.dataTable.ext.search.push(function (settings, data, dataIndex) {
+      if (settings.nTable.id !== 'entityTable') return true;
+      if (currentTypeFilter === 'all') return true;
+      var tr = settings.aoData[dataIndex].nTr;
+      return tr && tr.getAttribute('data-entity-type') === currentTypeFilter;
+    });
+
+    // Expand / collapse (DataTables child-row API)
     `$('#entityTable tbody').on('click', '.expand-btn', function() {
       var btn = `$(this);
       var tr = btn.closest('tr');
@@ -445,17 +585,20 @@ $html = @"
     `$('.filter-btn').on('click', function() {
       `$('.filter-btn').removeClass('active').attr('aria-pressed','false');
       `$(this).addClass('active').attr('aria-pressed','true');
-      var filter = `$(this).data('filter');
-      if (filter === 'all') {
-        table.column(0).search('').draw();
-      } else {
-        table.column(0).search(filter, false, false).draw();
-      }
-      // Hide any open child rows on filter change
-      table.rows().every(function() {
-        if (this.child.isShown()) { this.child.hide(); }
-      });
+      currentTypeFilter = `$(this).data('filter');
+      table.rows().every(function() { if (this.child.isShown()) { this.child.hide(); } });
       `$('.expand-btn.open').removeClass('open').text('+');
+      table.draw();
+    });
+
+    // View toggle
+    `$('.view-btn').on('click', function() {
+      `$('.view-btn').removeClass('active').attr('aria-pressed','false');
+      `$(this).addClass('active').attr('aria-pressed','true');
+      var view = `$(this).data('view');
+      `$('#view-grouped').prop('hidden', view !== 'grouped');
+      `$('#view-entity').prop('hidden', view !== 'entity');
+      if (view === 'entity') { table.columns.adjust(); }
     });
   });
 </script>

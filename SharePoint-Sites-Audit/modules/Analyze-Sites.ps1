@@ -12,6 +12,19 @@ $ErrorActionPreference = "Stop"
 
 $sites          = Get-Content (Join-Path $DataDir "sites.json") | ConvertFrom-Json
 $tenantBaseline = Get-Content (Join-Path $DataDir "tenant-baseline.json") | ConvertFrom-Json
+$exportCtx      = if (Test-Path (Join-Path $DataDir "export-context.json")) {
+                    Get-Content (Join-Path $DataDir "export-context.json") | ConvertFrom-Json
+                  } else { $null }
+
+# SharePoint admin center URL (sites management view). Specific-site deep link isn't
+# supported by the admin center URL schema, so we link to the Active Sites list where
+# the admin can filter by URL or name.
+$adminBaseUrl = $null
+if ($exportCtx -and $exportCtx.TenantDomain) {
+    # Infer admin host from tenant: contoso.onmicrosoft.com -> contoso-admin.sharepoint.com
+    $tenantPart = ($exportCtx.TenantDomain -replace '\.onmicrosoft\.com$','' -replace '\..*$','')
+    $adminBaseUrl = "https://$tenantPart-admin.sharepoint.com/_layouts/15/online/AdminHome.aspx#/siteManagement"
+}
 
 # Define sharing capability severity order — higher = more permissive
 $capabilityRank = @{
@@ -88,18 +101,20 @@ foreach ($s in $sites) {
         } catch {}
     }
 
-    # Check 6: Site ownership (0 or 1 owner — no redundancy)
-    # SPO stores a single Owner string; we use the presence/absence heuristic
-    if (-not $s.Owner -or $s.Owner -eq '') {
+    # Check 6: Site ownership — only flag non-group-connected sites with no primary admin.
+    # Group-connected sites have owners managed on the M365 group, so PnP's Owner field
+    # is typically empty for them; skipping those avoids false positives.
+    $isGroupConnected = ($s.GroupId -and $s.GroupId -ne '' -and $s.GroupId -ne '00000000-0000-0000-0000-000000000000')
+    $ownerIsSystem    = ($s.Owner -match 'SHAREPOINT\\system' -or $s.Owner -match 'c:0\(\.s\|true')
+    if (-not $isGroupConnected -and ($ownerIsSystem -or -not $s.Owner -or $s.Owner -eq '')) {
         $siteFindings += [PSCustomObject]@{
             Id = "SP-006"
-            Title = "Site has no owner assigned"
+            Title = "Site has no primary admin assigned"
             Severity = "Medium"
-            Details = "No primary owner recorded for this site."
-            Remediation = "Assign at least two site owners for operational redundancy."
+            Details = "Non-group site has no primary admin or only a system account. Owner: '$($s.Owner)'."
+            Remediation = "Assign at least one explicit site collection admin for operational continuity."
         }
     }
-    # Note: SPO `Owner` returns the primary admin only. Multi-owner check would require Graph /sites/{id}/drive/owner or site permissions call.
 
     # Check 7: Sensitivity label missing on site
     if (-not $s.SensitivityLabel -or $s.SensitivityLabel -eq '') {
@@ -130,7 +145,8 @@ foreach ($s in $sites) {
             EntityType    = "Site"
             EntityId      = $s.Url
             EntityName    = $s.Title
-            EntityUrl     = $s.Url
+            EntityUrl     = $s.Url                          # direct link to the site
+            AdminUrl      = if ($adminBaseUrl) { $adminBaseUrl } else { $null }  # SP admin center
             StorageBytes  = $s.StorageUsageCurrent
             SharingCap    = $s.SharingCapability
             ExternalCount = $s.ExternalUserCount

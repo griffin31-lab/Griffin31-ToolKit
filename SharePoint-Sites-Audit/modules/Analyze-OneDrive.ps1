@@ -11,6 +11,14 @@ $ErrorActionPreference = "Stop"
 
 $oneDrives      = Get-Content (Join-Path $DataDir "onedrives.json") | ConvertFrom-Json
 $tenantBaseline = Get-Content (Join-Path $DataDir "tenant-baseline.json") | ConvertFrom-Json
+$exportCtx      = if (Test-Path (Join-Path $DataDir "export-context.json")) {
+                    Get-Content (Join-Path $DataDir "export-context.json") | ConvertFrom-Json
+                  } else { $null }
+$adminBaseUrl = $null
+if ($exportCtx -and $exportCtx.TenantDomain) {
+    $tenantPart = ($exportCtx.TenantDomain -replace '\.onmicrosoft\.com$','' -replace '\..*$','')
+    $adminBaseUrl = "https://$tenantPart-admin.sharepoint.com/_layouts/15/online/AdminHome.aspx#/oneDriveManagement"
+}
 
 $capabilityRank = @{
     'Disabled' = 0
@@ -57,6 +65,7 @@ foreach ($od in $oneDrives) {
             EntityId      = $od.Url
             EntityName    = if ($od.Owner) { $od.Owner } else { $od.Title }
             EntityUrl     = $od.Url
+            AdminUrl      = if ($adminBaseUrl) { $adminBaseUrl } else { $null }
             StorageBytes  = $od.StorageUsageCurrent
             SharingCap    = $od.SharingCapability
             ExternalCount = $od.ExternalUserCount
