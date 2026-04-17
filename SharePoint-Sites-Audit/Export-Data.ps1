@@ -109,32 +109,26 @@ try {
     Write-Host "        Connected to $SpoAdminUrl" -ForegroundColor Green
 } catch {
     $errMsg = $_.Exception.Message
-    Write-Host "        [!] PnP connection failed: $errMsg" -ForegroundColor Red
 
-    # AADSTS700016 = app not found in the directory. This means the Entra app was deleted
-    # (or the ClientId in config is wrong). The config is stale — wipe it and re-run setup next time.
+    # AADSTS700016 = app not found. Handled by the outer Manager via exit code 2.
+    # Skip the raw Azure error and show a clean recovery message.
     if ($errMsg -match 'AADSTS700016|was not found in the directory') {
-        Write-Host ""
-        Write-Host "  [!] The Entra ID app registration '$clientId' no longer exists in your tenant." -ForegroundColor Yellow
-        Write-Host "      It was probably deleted. I will now clear the stale local config so the next" -ForegroundColor Yellow
-        Write-Host "      run automatically triggers first-time setup to register a new app." -ForegroundColor Yellow
-        Write-Host ""
+        Write-Host "        Configured Entra app no longer exists — preparing to re-register." -ForegroundColor Yellow
         try {
             $configDir = Split-Path $ConfigPath -Parent
             $backupPath = "$ConfigPath.bak-$(Get-Date -Format 'yyyyMMddHHmmss')"
-            if (Test-Path $ConfigPath) { Move-Item -Path $ConfigPath -Destination $backupPath -Force }
+            if (Test-Path $ConfigPath) { Move-Item -Path $ConfigPath -Destination $backupPath -Force | Out-Null }
             $certFolder = Join-Path $configDir "cert"
             if (Test-Path $certFolder) { Remove-Item -Path $certFolder -Recurse -Force -ErrorAction SilentlyContinue }
-            Write-Host "      Stale config moved to: $backupPath" -ForegroundColor DarkGray
-            Write-Host "      Stale cert folder removed." -ForegroundColor DarkGray
-            Write-Host ""
-            Write-Host "      -> Run the tool again and pick the same menu option. Setup will auto-trigger." -ForegroundColor Green
         } catch {
-            Write-Host "      [!] Could not clean up config: $($_.Exception.Message)" -ForegroundColor Red
-            Write-Host "          Manually delete $ConfigPath and re-run." -ForegroundColor Yellow
+            Write-Host "        [!] Could not clean up stale config: $($_.Exception.Message)" -ForegroundColor Red
+            Write-Host "            Manually delete $ConfigPath and re-run." -ForegroundColor Yellow
         }
         exit 2
     }
+
+    # Any other connection failure — show the raw error so the admin can diagnose
+    Write-Host "        [!] PnP connection failed: $errMsg" -ForegroundColor Red
     if ($errMsg -match 'AADSTS7000215|invalid_client|AADSTS50034|unauthorized|consent|propagat') {
         Write-Host ""
         Write-Host "  [!] Admin consent may not have propagated yet. Wait 2-3 minutes and retry." -ForegroundColor Yellow
