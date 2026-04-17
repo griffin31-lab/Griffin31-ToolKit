@@ -259,6 +259,20 @@ function Invoke-DataExport {
     if ($FullScan) { $pwshArgs += '-FullScan' }
 
     $process = Start-Process -FilePath $pwshCmd -ArgumentList $pwshArgs -Wait -PassThru -NoNewWindow
+
+    # Exit code 2 = app registration was deleted; Export-Data already moved config.json aside.
+    # Auto-recover: run setup again, then retry the export.
+    if ($process.ExitCode -eq 2) {
+      Write-ColorText "`n[!] Stale app detected — running setup to register a new app..." -Color Yellow
+      Invoke-FirstTimeSetup -TenantInfo $TenantInfo -Directories $Directories
+      if (-not (Get-PnPClientId -Directories $Directories)) {
+        Write-ColorText "Setup did not complete. Cancelling." -Color Red
+        return $false
+      }
+      Write-ColorText "`nRetrying export with the new app..." -Color Cyan
+      $process = Start-Process -FilePath $pwshCmd -ArgumentList $pwshArgs -Wait -PassThru -NoNewWindow
+    }
+
     if ($process.ExitCode -ne 0) { throw "Export exited with code $($process.ExitCode)" }
 
     Write-ColorText "`nData export completed." -Color Green

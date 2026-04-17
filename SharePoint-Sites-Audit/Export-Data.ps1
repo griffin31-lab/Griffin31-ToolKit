@@ -73,10 +73,13 @@ function Connect-PnPWithRetry {
             return $true
         } catch {
             $msg = $_.Exception.Message
-            # Retry only on known propagation errors — fast-fail on everything else
-            if ($msg -match 'AADSTS700027|AADSTS7000215|AADSTS50034|AADSTS500011|AADSTS50105|unauthorized|not registered|not found in the directory|AADSTS700016') {
+            # AADSTS700016 = app does not exist. No amount of retrying will fix this.
+            # Throw immediately so the outer handler wipes config and re-triggers setup.
+            if ($msg -match 'AADSTS700016|was not found in the directory') { throw }
+            # Retry only on known cert/consent propagation errors — fast-fail on everything else
+            if ($msg -match 'AADSTS700027|AADSTS7000215|AADSTS50034|AADSTS500011|AADSTS50105|unauthorized|not registered') {
                 if ($i -eq $maxAttempts - 1) { throw }
-                Write-Host "        (propagation pending — $($msg.Substring(0, [Math]::Min(80, $msg.Length)))...)" -ForegroundColor DarkGray
+                Write-Host "        (propagation pending — retrying)" -ForegroundColor DarkGray
                 continue
             }
             throw
