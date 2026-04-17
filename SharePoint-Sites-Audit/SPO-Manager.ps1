@@ -181,17 +181,10 @@ function Invoke-FirstTimeSetup {
 }
 
 function Show-MainMenu {
-  param($TenantInfo, $Directories)
+  param($TenantInfo)
   Write-Header "MAIN MENU - $($TenantInfo.Domain)"
-  $hasClientId = [bool](Get-PnPClientId -Directories $Directories)
   Write-ColorText "Tenant directory: $($TenantInfo.TenantDir)" -Color Gray
-  if ($hasClientId) {
-    Write-ColorText "PnP app: configured" -Color DarkGreen
-  } else {
-    Write-ColorText "PnP app: NOT configured — run option 0 first" -Color Yellow
-  }
   Write-ColorText ""
-  Write-ColorText "0. First-time setup (register PnP Entra app — run ONCE)" -Color $(if ($hasClientId) { 'DarkGray' } else { 'Green' })
   Write-ColorText "1. Export data only (SharePoint + Graph)" -Color White
   Write-ColorText "2. Analyze existing data" -Color White
   Write-ColorText "3. Full pipeline — Sample mode (top 100 sites by storage)" -Color Green
@@ -199,23 +192,42 @@ function Show-MainMenu {
   Write-ColorText "5. View previous reports" -Color White
   Write-ColorText "6. Exit" -Color White
   Write-ColorText ""
-  Write-Host -NoNewline "Select option (0-6): " -ForegroundColor Yellow
+  Write-Host -NoNewline "Select option (1-6): " -ForegroundColor Yellow
+}
+
+function Confirm-Setup {
+  param($TenantInfo, $Directories)
+  # If config exists, nothing to do.
+  if (Get-PnPClientId -Directories $Directories) { return $true }
+
+  Write-Host ""
+  Write-ColorText "No PnP app is registered for this tenant yet." -Color Yellow
+  Write-ColorText "First-time setup will register an Entra ID app + generate a cert." -Color Gray
+  Write-ColorText "You will need Global Administrator access ONCE to approve consent." -Color Gray
+  Write-Host ""
+  Write-Host -NoNewline "Run first-time setup now? (Y/n): " -ForegroundColor Yellow
+  $answer = Read-Host
+  if ($answer -eq 'n' -or $answer -eq 'N') {
+    Write-ColorText "Cancelled. Cannot run without a registered app." -Color Red
+    Write-ColorText "Press any key..." -Color Gray
+    $null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+    return $false
+  }
+
+  Invoke-FirstTimeSetup -TenantInfo $TenantInfo -Directories $Directories
+  # Verify setup succeeded
+  if (-not (Get-PnPClientId -Directories $Directories)) {
+    return $false
+  }
+  return $true
 }
 
 function Invoke-DataExport {
   param($TenantInfo, $Directories, [bool]$FullScan = $false)
+  if (-not (Confirm-Setup -TenantInfo $TenantInfo -Directories $Directories)) { return $false }
+
   Write-Header "DATA EXPORT - $($TenantInfo.Domain)"
   Write-ColorText "Mode: $(if ($FullScan) { 'Full scan' } else { 'Sample (top 100 sites)' })" -Color Gray
-
-  $clientId = Get-PnPClientId -Directories $Directories
-  if (-not $clientId) {
-    Write-ColorText "`n[!] PnP Entra app is not configured yet." -Color Red
-    Write-ColorText "    Run menu option 0 (First-time setup) first." -Color Yellow
-    Write-ColorText "`nPress any key to return..." -Color Gray
-    $null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
-    return $false
-  }
-  Write-ColorText "Using PnP ClientId: $clientId" -Color DarkGray
 
   $exportScript = Join-Path $PSScriptRoot "Export-Data.ps1"
   if (-not (Test-Path $exportScript)) {
@@ -236,7 +248,7 @@ function Invoke-DataExport {
       '-OutputFolder', $Directories.DataDir,
       '-TenantDomain', $TenantInfo.Domain,
       '-SpoAdminUrl', $TenantInfo.SpoAdminUrl,
-      '-ClientId', $clientId
+      '-ConfigPath', $Directories.ConfigPath
     )
     if ($FullScan) { $pwshArgs += '-FullScan' }
 
@@ -352,10 +364,9 @@ $tenant = Get-TenantInfo
 $dirs   = Initialize-TenantDirectory -TenantInfo $tenant
 
 while ($true) {
-  Show-MainMenu -TenantInfo $tenant -Directories $dirs
+  Show-MainMenu -TenantInfo $tenant
   $choice = Read-Host
   switch ($choice) {
-    '0' { Invoke-FirstTimeSetup -TenantInfo $tenant -Directories $dirs }
     '1' { Invoke-DataExport -TenantInfo $tenant -Directories $dirs -FullScan $false | Out-Null }
     '2' { Invoke-Analysis   -TenantInfo $tenant -Directories $dirs | Out-Null }
     '3' {

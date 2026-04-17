@@ -6,59 +6,95 @@ param(
     [string]$TenantDomain,
     [Parameter(Mandatory)]
     [string]$SpoAdminUrl,
+    [Parameter(Mandatory)]
+    [string]$ConfigPath,
     [switch]$FullScan,
-    [int]$SampleSize = 100,
-    [string]$ClientId  # Optional: custom Entra app ID for PnP connection
+    [int]$SampleSize = 100
 )
 
 $ErrorActionPreference = "Stop"
 
 Write-Host ""
-Write-Host "  SharePoint Sites Audit — Data Export (PnP.PowerShell)" -ForegroundColor Cyan
+Write-Host "  SharePoint Sites Audit — Data Export (PnP + Graph, app-only cert auth)" -ForegroundColor Cyan
 Write-Host "  Tenant:     $TenantDomain" -ForegroundColor Gray
 Write-Host "  SPO admin:  $SpoAdminUrl" -ForegroundColor Gray
 Write-Host "  Mode:       $(if ($FullScan) { 'Full scan' } else { "Sample ($SampleSize sites)" })" -ForegroundColor Gray
 Write-Host ""
 
+if (-not (Test-Path $ConfigPath)) {
+    Write-Host "  [!] Config file not found: $ConfigPath" -ForegroundColor Red
+    Write-Host "      Run first-time setup via SPO-Manager.ps1" -ForegroundColor Yellow
+    exit 1
+}
 if (-not (Test-Path $OutputFolder)) { New-Item -ItemType Directory -Path $OutputFolder -Force | Out-Null }
 
-# ── Phase 1: Connect to SharePoint via PnP ──
-Write-Host "  [1/4] Connecting to SharePoint Online (PnP)..." -ForegroundColor Cyan
-Write-Host "        A browser window will open for sign-in." -ForegroundColor DarkGray
-Write-Host "        If this is your first time using PnP.PowerShell, you will be asked to" -ForegroundColor DarkGray
-Write-Host "        consent to the 'PnP Management Shell' app. Approve once." -ForegroundColor DarkGray
+# Load config: ClientId, CertificatePath, EncryptedCertPassword
+$config = Get-Content $ConfigPath -Raw | ConvertFrom-Json
+$clientId     = $config.ClientId
+$certPath     = $config.CertificatePath
+$encryptedPw  = $config.EncryptedCertPassword
+$thumbprint   = $config.CertificateThumbprint
 
+if (-not (Test-Path $certPath)) {
+    Write-Host "  [!] Certificate not found: $certPath" -ForegroundColor Red
+    Write-Host "      Config may be stale. Delete config.json and re-run to redo setup." -ForegroundColor Yellow
+    exit 1
+}
+
+$securePw = $encryptedPw | ConvertTo-SecureString
+
+# ── Phase 1: Connect to SharePoint via PnP (cert-based, silent) ──
+Write-Host "  [1/4] Connecting to SharePoint Online (PnP, cert auth — silent)..." -ForegroundColor Cyan
 try {
     Import-Module PnP.PowerShell -ErrorAction Stop
-    $connArgs = @{ Url = $SpoAdminUrl; Interactive = $true; ErrorAction = 'Stop' }
-    if ($ClientId) { $connArgs['ClientId'] = $ClientId }
-    Connect-PnPOnline @connArgs
-    $connection = Get-PnPConnection -ErrorAction Stop
+    Connect-PnPOnline `
+        -Url $SpoAdminUrl `
+        -ClientId $clientId `
+        -Tenant $TenantDomain `
+        -CertificatePath $certPath `
+        -CertificatePassword $securePw `
+        -ErrorAction Stop
     Write-Host "        Connected to $SpoAdminUrl" -ForegroundColor Green
 } catch {
     Write-Host "        [!] PnP connection failed: $($_.Exception.Message)" -ForegroundColor Red
-    if ($_.Exception.Message -match 'AADSTS65001|consent|application') {
+    if ($_.Exception.Message -match 'AADSTS7000215|invalid_client|AADSTS50034|unauthorized|AADSTS700016') {
         Write-Host ""
-        Write-Host "  [!] App consent needed. Run this once, then re-run the script:" -ForegroundColor Yellow
-        Write-Host "      Register-PnPEntraIDApp -ApplicationName 'Griffin31 SPO Audit' -Tenant $TenantDomain -Interactive" -ForegroundColor Yellow
-        Write-Host "      Then pass the returned ClientId: -ClientId <app-id>" -ForegroundColor Yellow
+        Write-Host "  [!] Admin consent may not have propagated yet. Wait 2-3 minutes and retry." -ForegroundColor Yellow
+        Write-Host "      If the problem persists, delete config.json and re-run setup." -ForegroundColor Yellow
     }
     exit 1
 }
 
-# ── Phase 2: Connect to Microsoft Graph ──
+# ── Phase 2: Connect to Microsoft Graph (cert-based, same app, silent) ──
 Write-Host ""
-Write-Host "  [2/4] Connecting to Microsoft Graph..." -ForegroundColor Cyan
-$graphScopes = @(
-    "Group.Read.All",
-    "Directory.Read.All",
-    "InformationProtectionPolicy.Read"
-)
+Write-Host "  [2/4] Connecting to Microsoft Graph (cert auth — silent)..." -ForegroundColor Cyan
+
+# Resolve TenantId (needed for Graph cert auth)
+$tenantId = $null
 try {
-    Connect-MgGraph -Scopes $graphScopes -NoWelcome
+    # Derive from PnP connection: the tenant GUID is available via Get-PnPTenantId or similar
+    $tenantId = (Get-PnPTenantId -ErrorAction Stop)
+} catch {
+    # Fallback: look up via OpenID discovery
+    try {
+        $disc = Invoke-RestMethod -Uri "https://login.microsoftonline.com/$TenantDomain/v2.0/.well-known/openid-configuration"
+        if ($disc.issuer -match 'sts\.windows\.net/([0-9a-f-]{36})') { $tenantId = $Matches[1] }
+    } catch {}
+}
+if (-not $tenantId) {
+    Write-Host "        [!] Could not determine Tenant ID." -ForegroundColor Red
+    exit 1
+}
+
+try {
+    # Use the same PFX cert. Graph module accepts -CertificateThumbprint or -Certificate (X509Certificate2 object).
+    Add-Type -AssemblyName System.Security
+    $plainPw = [System.Net.NetworkCredential]::new("", $securePw).Password
+    $certObj = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 $certPath, $plainPw
+    Connect-MgGraph -ClientId $clientId -TenantId $tenantId -Certificate $certObj -NoWelcome
     $ctx = Get-MgContext
     if (-not $ctx) { throw "Graph context not established." }
-    Write-Host "        Connected as $($ctx.Account)" -ForegroundColor Green
+    Write-Host "        Connected as app $clientId (app-only)" -ForegroundColor Green
 } catch {
     Write-Host "        [!] Graph connection failed: $($_.Exception.Message)" -ForegroundColor Red
     try { Disconnect-PnPOnline -ErrorAction SilentlyContinue } catch {}
@@ -253,7 +289,7 @@ try {
 $ctxExport = @{
     TenantDomain = $TenantDomain
     ExportedAt   = (Get-Date).ToString("o")
-    RunBy        = $ctx.Account
+    RunBy        = if ($ctx.Account) { $ctx.Account } else { "AppOnly:$clientId" }
     Mode         = if ($FullScan) { "FullScan" } else { "Sample-$SampleSize" }
     Module       = "PnP.PowerShell"
 }

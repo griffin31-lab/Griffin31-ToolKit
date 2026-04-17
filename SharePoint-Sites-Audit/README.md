@@ -40,18 +40,25 @@ Per-entity, per-API. Fourteen checks covering four entity types:
 - **Role**: SharePoint Administrator minimum
 - **Graph scopes**: `Group.Read.All`, `Directory.Read.All`, `InformationProtectionPolicy.Read`
 
-### First-time setup (ONCE per tenant)
+### First-time setup (auto, ONCE per tenant)
 
-PnP.PowerShell 3.x no longer ships with a shared Microsoft app — every tenant registers its own. The tool does this for you on first run:
+The tool registers its own Entra ID app on first run — no manual portal work. Pick any menu option (1-5) and if the tenant isn't set up yet, the tool will:
 
-1. Launch `pwsh ./SPO-Manager.ps1`
-2. Pick menu option **0** ("First-time setup")
-3. A browser window opens — sign in as Global Administrator and approve consent
-4. Tool saves the generated ClientId to `tenants/<your-domain>/config.json`
+1. Prompt you to sign in as **Global Administrator** (browser opens)
+2. Ask for an app name (default: `Griffin31 SPO Audit`)
+3. Create the Entra app
+4. Generate a self-signed certificate on this machine
+5. Upload the cert's public key to the app
+6. Grant app-only permissions (SharePoint + Graph)
+7. Save config (ClientId + cert path + encrypted cert password) to `tenants/<domain>/config.json`
 
-After that, options 1-4 work without further prompts. The registered app is **delegated-only** — no client secret, no certificate. Scopes requested: `Group.Read.All`, `Directory.Read.All`, `InformationProtectionPolicy.Read`, `SharePoint AllSites.FullControl`.
+**Every subsequent run is silent** — the cert auto-authenticates. No browser, no sign-in prompt, no client secret.
 
-If your org doesn't allow non-GA admins to register apps, ask a Global Admin to run option 0 once; the ClientId can then be reused by any delegated user with SharePoint Admin role.
+App-only permissions requested:
+- Graph (Application): `Group.Read.All`, `Directory.Read.All`, `InformationProtectionPolicy.Read.All`, `Sites.Read.All`
+- SharePoint (Application): `Sites.FullControl.All`, `User.Read.All`
+
+If consent fails because your tenant blocks user-initiated app registrations, ask a Global Admin to run the tool once (just pick menu option 1 and approve when prompted).
 
 ## How it works
 
