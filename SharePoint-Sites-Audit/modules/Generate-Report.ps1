@@ -90,9 +90,11 @@ function FormatBytes($b) {
 
 $bandColor = BandColor $tenantBand
 
-# ── Build entity rows ──
+# ── Build entity rows (details stored in hidden <template>, revealed via DataTables child-row API) ──
 $entityRowsHtml = ""
+$detailsMapJson = ""
 $idx = 0
+$detailsMap = @{}
 if ($insights -and $insights.Entities) {
     foreach ($e in $insights.Entities) {
         $idx++
@@ -106,6 +108,7 @@ if ($insights -and $insights.Entities) {
 </div>
 "@
         }
+        $detailsMap["row-$idx"] = $findingsList
 
         $metaChips = ""
         if ($e.EntityType -in @('Site','OneDrive')) {
@@ -122,20 +125,19 @@ if ($insights -and $insights.Entities) {
         $entityLink = if ($e.EntityUrl) { "<a href='$(HtmlEncode $e.EntityUrl)' target='_blank' rel='noopener'>$(HtmlEncode $e.EntityName)</a>" } else { HtmlEncode $e.EntityName }
 
         $entityRowsHtml += @"
-<tr data-entity-type='$(HtmlEncode $e.EntityType)'>
+<tr data-entity-type='$(HtmlEncode $e.EntityType)' data-details-key='row-$idx'>
   <td class='col-type'>$(EntityTypeBadge $e.EntityType)</td>
   <td class='col-name'>$entityLink<div class='meta-row'>$metaChips</div></td>
   <td class='col-score'>$(ScoreBadge $e.Score)</td>
   <td class='col-issues'>$issueCount</td>
-  <td class='col-expand'><button class='expand-btn' aria-label='Expand details' data-target='entity-details-$idx'>+</button></td>
-</tr>
-<tr class='details-row' id='entity-details-$idx' hidden>
-  <td colspan='5'><div class='details-inner'>$findingsList</div></td>
+  <td class='col-expand'><button class='expand-btn' aria-label='Expand details' type='button'>+</button></td>
 </tr>
 "@
     }
+    $detailsMapJson = ($detailsMap | ConvertTo-Json -Compress)
 } else {
     $entityRowsHtml = "<tr><td colspan='5' class='empty'>No entities with findings.</td></tr>"
+    $detailsMapJson = "{}"
 }
 
 # ── Assemble full HTML ──
@@ -411,6 +413,8 @@ $html = @"
 </main>
 
 <script>
+  var detailsMap = $detailsMapJson;
+
   `$(document).ready(function() {
     var table = `$('#entityTable').DataTable({
       pageLength: 25,
@@ -421,16 +425,19 @@ $html = @"
       ]
     });
 
-    // Expand / collapse details
-    `$('#entityTable').on('click', '.expand-btn', function() {
-      var targetId = `$(this).data('target');
-      var row = `$('#' + targetId);
-      if (row.is(':visible')) {
-        row.hide();
-        `$(this).removeClass('open').text('+');
+    // Expand / collapse using DataTables child-row API
+    `$('#entityTable tbody').on('click', '.expand-btn', function() {
+      var btn = `$(this);
+      var tr = btn.closest('tr');
+      var row = table.row(tr);
+      var key = tr.attr('data-details-key');
+      if (row.child.isShown()) {
+        row.child.hide();
+        btn.removeClass('open').text('+');
       } else {
-        row.show();
-        `$(this).addClass('open').text('−');
+        var html = '<div class="details-inner">' + (detailsMap[key] || '<em>No details.</em>') + '</div>';
+        row.child(html).show();
+        btn.addClass('open').text('−');
       }
     });
 
@@ -442,11 +449,12 @@ $html = @"
       if (filter === 'all') {
         table.column(0).search('').draw();
       } else {
-        // Search against the Type column (col 0) — match badge text
         table.column(0).search(filter, false, false).draw();
       }
-      // Hide all details rows on filter change
-      `$('.details-row').hide();
+      // Hide any open child rows on filter change
+      table.rows().every(function() {
+        if (this.child.isShown()) { this.child.hide(); }
+      });
       `$('.expand-btn.open').removeClass('open').text('+');
     });
   });

@@ -83,10 +83,11 @@ try {
 
 # ── Helpers ──
 function Invoke-GraphPaged {
-    param([string]$Uri)
+    param([string]$Uri, [hashtable]$ExtraHeaders = @{})
     $all = @()
     $next = $Uri
     $headers = @{ Authorization = "Bearer $script:graphToken" }
+    foreach ($k in $ExtraHeaders.Keys) { $headers[$k] = $ExtraHeaders[$k] }
     while ($next) {
         try {
             $resp = Invoke-RestMethod -Method GET -Uri $next -Headers $headers -ErrorAction Stop
@@ -211,19 +212,32 @@ try {
 # ── Phase 4: Fetch groups + teams via Graph ──
 Write-Host ""
 Write-Host "  [4/4] Fetching M365 groups and Teams (via Graph)..." -ForegroundColor Cyan
+
+# `resourceProvisioningOptions` requires ConsistencyLevel: eventual. To avoid that
+# quirk, fetch groups WITHOUT that field and query /teams separately.
 try {
-    $groups = Invoke-GraphPaged "https://graph.microsoft.com/v1.0/groups?`$top=999&`$select=id,displayName,mail,mailEnabled,securityEnabled,groupTypes,visibility,resourceProvisioningOptions,assignedLabels,createdDateTime"
+    $groups = Invoke-GraphPaged "https://graph.microsoft.com/v1.0/groups?`$top=999&`$select=id,displayName,mail,mailEnabled,securityEnabled,groupTypes,visibility,assignedLabels,createdDateTime"
     Write-Host "        Found $($groups.Count) groups" -ForegroundColor Green
 } catch {
     Write-Host "        [!] Groups fetch failed: $($_.Exception.Message)" -ForegroundColor Red
     $groups = @()
 }
 
+# Build a set of team-backed group IDs via /teams
+$teamGroupIds = @{}
+try {
+    $teams = Invoke-GraphPaged "https://graph.microsoft.com/v1.0/teams?`$top=999&`$select=id,displayName"
+    foreach ($t in $teams) { if ($t.id) { $teamGroupIds[[string]$t.id] = $true } }
+    Write-Host "        Found $($teams.Count) team(s)" -ForegroundColor Green
+} catch {
+    Write-Host "        (skip) Teams fetch failed: $($_.Exception.Message)" -ForegroundColor DarkGray
+}
+
 $groupRecords = @()
 $teamRecords  = @()
 foreach ($g in $groups) {
     $isUnified = @($g.groupTypes) -contains 'Unified'
-    $isTeam    = @($g.resourceProvisioningOptions) -contains 'Team'
+    $isTeam    = $teamGroupIds.ContainsKey([string]$g.id)
     $labelIds  = @()
     if ($g.assignedLabels) { $labelIds = @($g.assignedLabels | ForEach-Object { $_.labelId }) }
     $rec = [PSCustomObject]@{
