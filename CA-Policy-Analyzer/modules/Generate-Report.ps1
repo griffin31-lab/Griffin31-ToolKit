@@ -721,7 +721,7 @@ $html = @"
 
 <header class='topbar' role='banner'>
   <a href='https://www.griffin31.com' target='_blank' rel='noopener' class='brand' aria-label='Griffin31 website'>
-    <img src='https://avatars.githubusercontent.com/u/230988388?s=120' alt='Griffin31' class='brand-logo' width='36' height='36'>
+    <img src='https://avatars.githubusercontent.com/u/226283929?s=120' alt='Griffin31' class='brand-logo' width='36' height='36'>
     <span class='brand-text'>
       <span class='brand-name'>Griffin31</span>
       <span class='brand-sub'>Conditional Access Analysis</span>

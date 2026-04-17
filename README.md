@@ -11,6 +11,7 @@
 
 <p>
   <a href="https://github.com/griffin31-lab/Griffin31-ToolKit/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/griffin31-lab/Griffin31-ToolKit?style=for-the-badge&color=4472C4&labelColor=1B2A4A"/></a>
+  <img alt="Tools" src="https://img.shields.io/badge/Tools-8-4472C4?style=for-the-badge&labelColor=1B2A4A"/>
   <a href="https://github.com/griffin31-lab/Griffin31-ToolKit/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/badge/License-MIT-4472C4?style=for-the-badge&labelColor=1B2A4A"/></a>
   <img alt="PowerShell" src="https://img.shields.io/badge/PowerShell-7.x-4472C4?style=for-the-badge&labelColor=1B2A4A&logo=powershell&logoColor=white"/>
   <img alt="Platform" src="https://img.shields.io/badge/Windows%20%7C%20macOS-lightgrey?style=for-the-badge&labelColor=1B2A4A"/>
@@ -126,7 +127,13 @@ Recursively walks your entire SPF include chain, counts the real DNS lookup tota
 </td>
 <td width="50%" valign="top">
 
-&nbsp;
+### [SharePoint-Sites-Audit](SharePoint-Sites-Audit/)
+
+**Find the risky sites, OneDrives, groups, and teams**
+
+Iterates every SharePoint site, OneDrive account, M365 group, and Team. Runs 14 per-entity security checks — public sharing, excessive external users, inactive sites, missing sensitivity labels — and produces a self-contained HTML report with per-entity scores and drill-down findings.
+
+`SharePoint` · `OneDrive` · `Teams` · `Sensitivity Labels` · `External Sharing`
 
 </td>
 </tr>
