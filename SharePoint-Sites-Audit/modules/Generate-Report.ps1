@@ -185,14 +185,17 @@ if ($flatFindings.Count -gt 0) {
         }
         $groupedHtml += @"
 <div class='grouped-finding' style='border-left-color:$sevColor'>
-  <div class='grouped-head'>
+  <button class='grouped-head' type='button' aria-expanded='false'>
     $(SeverityPill $first.Severity)
     <span class='finding-id'>$(HtmlEncode $first.FindingId)</span>
     <span class='grouped-title'>$(HtmlEncode $first.Title)</span>
     <span class='grouped-count'>$($grp.Count) affected</span>
+    <span class='chev' aria-hidden='true'>+</span>
+  </button>
+  <div class='grouped-body' hidden>
+    <div class='grouped-rem'><strong>Remediation:</strong> $(HtmlEncode $first.Remediation)</div>
+    <ul class='grouped-entities'>$entitiesList</ul>
   </div>
-  <div class='grouped-rem'><strong>Remediation:</strong> $(HtmlEncode $first.Remediation)</div>
-  <ul class='grouped-entities'>$entitiesList</ul>
 </div>
 "@
     }
@@ -349,21 +352,38 @@ $html = @"
   }
   .filter-btn.active .chip-count { background: var(--accent); color: white; }
 
-  /* Group-by-finding cards */
+  /* Group-by-finding cards (collapsible) */
   .grouped-finding {
     background: white; border-left: 4px solid #2563EB;
     border: 1px solid var(--border); border-radius: 6px;
-    padding: 14px 18px; margin-bottom: 12px;
+    margin-bottom: 10px; overflow: hidden;
   }
-  .grouped-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+  .grouped-head {
+    width: 100%; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 14px 18px; background: transparent; border: none;
+    font-family: inherit; font-size: 14px; text-align: left;
+    cursor: pointer; transition: background 150ms;
+  }
+  .grouped-head:hover { background: #F8FAFC; }
+  .grouped-head[aria-expanded='true'] { background: #F1F5F9; }
   .grouped-title { font-size: 15px; font-weight: 600; color: var(--navy); }
   .grouped-count {
-    margin-left: auto;
     font-family: 'IBM Plex Mono', monospace;
     font-size: 12px; color: var(--muted);
-    background: var(--bg); padding: 2px 8px; border-radius: 4px;
+    background: var(--bg); padding: 2px 10px; border-radius: 4px;
   }
-  .grouped-rem { font-size: 13px; margin: 4px 0 8px 0; color: var(--text); }
+  .grouped-head .chev {
+    margin-left: auto;
+    width: 24px; height: 24px; line-height: 20px; text-align: center;
+    border: 1px solid var(--border); border-radius: 4px;
+    font-size: 16px; font-weight: 700; color: var(--muted);
+    transition: all 150ms;
+  }
+  .grouped-head:hover .chev { border-color: var(--accent); color: var(--accent); }
+  .grouped-head[aria-expanded='true'] .chev { background: var(--navy); color: white; border-color: var(--navy); }
+  .grouped-body { padding: 0 18px 14px 18px; border-top: 1px solid var(--border); }
+  .grouped-body[hidden] { display: none; }
+  .grouped-rem { font-size: 13px; margin: 12px 0 8px 0; color: var(--text); }
   .grouped-entities { list-style: none; padding: 0; margin: 0; }
   .grouped-entities li {
     padding: 8px 10px; border-top: 1px solid var(--border);
@@ -380,6 +400,14 @@ $html = @"
     text-decoration: none !important;
   }
   .site-link-chip:hover { border-color: var(--accent); color: var(--accent) !important; }
+
+  .expand-controls { display: flex; gap: 6px; margin-bottom: 10px; }
+  .expand-controls button {
+    background: white; border: 1px solid var(--border); border-radius: 4px;
+    padding: 6px 12px; font-family: inherit; font-size: 12px; font-weight: 600;
+    color: var(--muted); cursor: pointer;
+  }
+  .expand-controls button:hover { border-color: var(--accent); color: var(--accent); }
 
   /* Entity table */
   table.entities {
@@ -512,6 +540,10 @@ $html = @"
 
     <!-- GROUP BY FINDING VIEW -->
     <div id='view-grouped' class='view-panel'>
+      <div class='expand-controls'>
+        <button class='expand-all-btn' type='button' data-target='grouped'>Expand all</button>
+        <button class='collapse-all-btn' type='button' data-target='grouped'>Collapse all</button>
+      </div>
       $groupedHtml
     </div>
 
@@ -599,6 +631,33 @@ $html = @"
       `$('#view-grouped').prop('hidden', view !== 'grouped');
       `$('#view-entity').prop('hidden', view !== 'entity');
       if (view === 'entity') { table.columns.adjust(); }
+    });
+
+    // Collapse / expand per-finding card (group-by-finding view)
+    `$('.grouped-head').on('click', function() {
+      var head = `$(this);
+      var body = head.next('.grouped-body');
+      var isOpen = head.attr('aria-expanded') === 'true';
+      if (isOpen) {
+        head.attr('aria-expanded','false');
+        body.prop('hidden', true);
+        head.find('.chev').text('+');
+      } else {
+        head.attr('aria-expanded','true');
+        body.prop('hidden', false);
+        head.find('.chev').text('−');
+      }
+    });
+
+    `$('.expand-all-btn').on('click', function() {
+      `$('.grouped-head').attr('aria-expanded','true');
+      `$('.grouped-body').prop('hidden', false);
+      `$('.grouped-head .chev').text('−');
+    });
+    `$('.collapse-all-btn').on('click', function() {
+      `$('.grouped-head').attr('aria-expanded','false');
+      `$('.grouped-body').prop('hidden', true);
+      `$('.grouped-head .chev').text('+');
     });
   });
 </script>
