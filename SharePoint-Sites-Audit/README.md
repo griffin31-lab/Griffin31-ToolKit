@@ -34,11 +34,21 @@ Per-entity, per-API. Fourteen checks covering four entity types:
 
 ## Requirements
 
-- PowerShell 7.x (Windows or macOS)
-- `Microsoft.Online.SharePoint.PowerShell` module (auto-installs if missing)
+- PowerShell 7.x (Windows, macOS, or Linux)
+- `PnP.PowerShell` module (auto-installs if missing) — cross-platform, modern auth
 - `Microsoft.Graph` module (auto-installs if missing)
 - **Role**: SharePoint Administrator minimum
-- **Graph scopes**: `Sites.Read.All`, `Group.Read.All`, `Directory.Read.All`, `InformationProtectionPolicy.Read`
+- **Graph scopes**: `Group.Read.All`, `Directory.Read.All`, `InformationProtectionPolicy.Read`
+
+### First-run note on PnP app consent
+
+On first connection, PnP will request consent for the **PnP Management Shell** app in your tenant. Approve once — subsequent runs use the stored consent. If your tenant blocks that app, register your own Entra ID app:
+
+```powershell
+Register-PnPEntraIDApp -ApplicationName 'Griffin31 SPO Audit' -Tenant <your-tenant>.onmicrosoft.com -Interactive
+```
+
+Then pass the returned ClientId to the export script via `-ClientId <guid>`.
 
 ## How it works
 

@@ -8,13 +8,13 @@ param(
     [string]$SpoAdminUrl,
     [switch]$FullScan,
     [int]$SampleSize = 100,
-    [int]$ExternalUserSampleSize = 25   # cap per-site Get-SPOUser enumeration to this many sites
+    [string]$ClientId  # Optional: custom Entra app ID for PnP connection
 )
 
 $ErrorActionPreference = "Stop"
 
 Write-Host ""
-Write-Host "  SharePoint Sites Audit — Data Export" -ForegroundColor Cyan
+Write-Host "  SharePoint Sites Audit — Data Export (PnP.PowerShell)" -ForegroundColor Cyan
 Write-Host "  Tenant:     $TenantDomain" -ForegroundColor Gray
 Write-Host "  SPO admin:  $SpoAdminUrl" -ForegroundColor Gray
 Write-Host "  Mode:       $(if ($FullScan) { 'Full scan' } else { "Sample ($SampleSize sites)" })" -ForegroundColor Gray
@@ -22,16 +22,27 @@ Write-Host ""
 
 if (-not (Test-Path $OutputFolder)) { New-Item -ItemType Directory -Path $OutputFolder -Force | Out-Null }
 
-# ── Phase 1: Connect to SharePoint Online ──
-Write-Host "  [1/4] Connecting to SharePoint Online..." -ForegroundColor Cyan
+# ── Phase 1: Connect to SharePoint via PnP ──
+Write-Host "  [1/4] Connecting to SharePoint Online (PnP)..." -ForegroundColor Cyan
 Write-Host "        A browser window will open for sign-in." -ForegroundColor DarkGray
+Write-Host "        If this is your first time using PnP.PowerShell, you will be asked to" -ForegroundColor DarkGray
+Write-Host "        consent to the 'PnP Management Shell' app. Approve once." -ForegroundColor DarkGray
+
 try {
-    Import-Module Microsoft.Online.SharePoint.PowerShell -DisableNameChecking -ErrorAction Stop
-    Connect-SPOService -Url $SpoAdminUrl -ErrorAction Stop
+    Import-Module PnP.PowerShell -ErrorAction Stop
+    $connArgs = @{ Url = $SpoAdminUrl; Interactive = $true; ErrorAction = 'Stop' }
+    if ($ClientId) { $connArgs['ClientId'] = $ClientId }
+    Connect-PnPOnline @connArgs
+    $connection = Get-PnPConnection -ErrorAction Stop
     Write-Host "        Connected to $SpoAdminUrl" -ForegroundColor Green
 } catch {
-    Write-Host "        [!] SPO connection failed: $($_.Exception.Message)" -ForegroundColor Red
-    Write-Host "        Check that the admin URL is correct and you have SharePoint Administrator role." -ForegroundColor Yellow
+    Write-Host "        [!] PnP connection failed: $($_.Exception.Message)" -ForegroundColor Red
+    if ($_.Exception.Message -match 'AADSTS65001|consent|application') {
+        Write-Host ""
+        Write-Host "  [!] App consent needed. Run this once, then re-run the script:" -ForegroundColor Yellow
+        Write-Host "      Register-PnPEntraIDApp -ApplicationName 'Griffin31 SPO Audit' -Tenant $TenantDomain -Interactive" -ForegroundColor Yellow
+        Write-Host "      Then pass the returned ClientId: -ClientId <app-id>" -ForegroundColor Yellow
+    }
     exit 1
 }
 
@@ -39,7 +50,6 @@ try {
 Write-Host ""
 Write-Host "  [2/4] Connecting to Microsoft Graph..." -ForegroundColor Cyan
 $graphScopes = @(
-    "Sites.Read.All",
     "Group.Read.All",
     "Directory.Read.All",
     "InformationProtectionPolicy.Read"
@@ -51,11 +61,11 @@ try {
     Write-Host "        Connected as $($ctx.Account)" -ForegroundColor Green
 } catch {
     Write-Host "        [!] Graph connection failed: $($_.Exception.Message)" -ForegroundColor Red
-    try { Disconnect-SPOService -ErrorAction SilentlyContinue } catch {}
+    try { Disconnect-PnPOnline -ErrorAction SilentlyContinue } catch {}
     exit 1
 }
 
-# ── Helper: Graph pagination ──
+# ── Helpers ──
 function Invoke-GraphPaged {
     param([string]$Uri)
     $all = @()
@@ -82,21 +92,21 @@ function Write-ProgressBar {
 
 # ── Phase 3: Fetch sites ──
 Write-Host ""
-Write-Host "  [3/4] Fetching SharePoint sites..." -ForegroundColor Cyan
+Write-Host "  [3/4] Fetching SharePoint sites (Get-PnPTenantSite)..." -ForegroundColor Cyan
 try {
-    # Include personal (OneDrive) sites for separate analysis
-    $allSites = Get-SPOSite -Limit All -IncludePersonalSite:$true -Detailed
+    # PnP: Get-PnPTenantSite -Detailed gives sharing capability, storage, dates. IncludeOneDriveSites pulls personal.
+    $allSites = Get-PnPTenantSite -Detailed -IncludeOneDriveSites -ErrorAction Stop
     Write-Host "        Found $($allSites.Count) total sites (including OneDrive)" -ForegroundColor Green
 } catch {
-    Write-Host "        [!] Get-SPOSite failed: $($_.Exception.Message)" -ForegroundColor Red
-    try { Disconnect-SPOService -ErrorAction SilentlyContinue } catch {}
+    Write-Host "        [!] Get-PnPTenantSite failed: $($_.Exception.Message)" -ForegroundColor Red
+    try { Disconnect-PnPOnline -ErrorAction SilentlyContinue } catch {}
     try { Disconnect-MgGraph -ErrorAction SilentlyContinue } catch {}
     exit 1
 }
 
-# Split sites vs OneDrive (personal)
+# Split sites vs OneDrive — PnP Template 'SPSPERS#10' or URL contains -my.sharepoint.com
 $nonPersonal = @($allSites | Where-Object { $_.Template -notmatch 'SPSPERS' -and $_.Url -notmatch '-my\.sharepoint\.com' })
-$oneDrives   = @($allSites | Where-Object { $_.Template -match 'SPSPERS'  -or  $_.Url -match '-my\.sharepoint\.com' })
+$oneDrives   = @($allSites | Where-Object { $_.Template -match 'SPSPERS' -or $_.Url -match '-my\.sharepoint\.com' })
 
 # Sample vs full
 if (-not $FullScan) {
@@ -106,15 +116,36 @@ if (-not $FullScan) {
     Write-Host "        Full scan: $($nonPersonal.Count) sites" -ForegroundColor Yellow
 }
 
+# ── Aggregate external user counts via Get-PnPExternalUser (tenant-wide, fast) ──
+Write-Host "        Fetching external user list (tenant-wide)..." -ForegroundColor Gray
+$externalUserMap = @{}
+try {
+    $extUsers = @()
+    $pageIdx = 0
+    $pageSize = 50
+    do {
+        $batch = @(Get-PnPExternalUser -PageSize $pageSize -Position ($pageIdx * $pageSize) -ErrorAction Stop)
+        $extUsers += $batch
+        $pageIdx++
+    } while ($batch.Count -eq $pageSize)
+    Write-Host "        Found $($extUsers.Count) external users tenant-wide" -ForegroundColor Green
+
+    # Bucket by AcceptedAs site URL where available (ExternalUser object has an InvitedAs site URL)
+    # Note: Get-PnPExternalUser does not reliably map each user to their host site. Count per known site via sharing URL match.
+    # For v1 we record tenant-wide total and per-site = null (marked as 'not measured').
+    foreach ($s in ($nonPersonal + $oneDrives)) {
+        $externalUserMap[$s.Url] = $null
+    }
+    # Tenant total exposed separately in tenant-baseline.json below.
+    $tenantExternalTotal = $extUsers.Count
+} catch {
+    Write-Host "        (skip) Get-PnPExternalUser not available or returned an error: $($_.Exception.Message)" -ForegroundColor DarkGray
+    $tenantExternalTotal = $null
+}
+
 # Build site records
 $siteRecords = @()
-$siteCount = $nonPersonal.Count
-$idx = 0
 foreach ($s in $nonPersonal) {
-    $idx++
-    if (($idx % 10) -eq 0 -or $idx -eq $siteCount) {
-        Write-ProgressBar -Current $idx -Total $siteCount -Activity "Enumerating sites" -Status $s.Title
-    }
     $siteRecords += [PSCustomObject]@{
         Url                      = $s.Url
         Title                    = $s.Title
@@ -127,42 +158,10 @@ foreach ($s in $nonPersonal) {
         SensitivityLabel         = [string]$s.SensitivityLabel
         GroupId                  = [string]$s.GroupId
         IsHubSite                = [bool]$s.IsHubSite
-    }
-}
-Write-Progress -Activity "Enumerating sites" -Completed
-
-# ── Per-site external user counts (slow — sample only unless FullScan) ──
-$externalUserMap = @{}
-$sitesToProbe = if ($FullScan) { $siteRecords } else {
-    @($siteRecords | Sort-Object -Property StorageUsageCurrent -Descending | Select-Object -First $ExternalUserSampleSize)
-}
-Write-Host ""
-Write-Host "        Fetching external user counts for $($sitesToProbe.Count) site(s)..." -ForegroundColor Gray
-$idx = 0
-foreach ($s in $sitesToProbe) {
-    $idx++
-    if (($idx % 5) -eq 0 -or $idx -eq $sitesToProbe.Count) {
-        Write-ProgressBar -Current $idx -Total $sitesToProbe.Count -Activity "External users per site" -Status $s.Title
-    }
-    try {
-        $ext = @(Get-SPOUser -Site $s.Url -Limit All -ErrorAction Stop | Where-Object { $_.IsExternalUser })
-        $externalUserMap[$s.Url] = $ext.Count
-    } catch {
-        # Access denied or site unreachable — skip
-        $externalUserMap[$s.Url] = $null
-    }
-}
-Write-Progress -Activity "External users per site" -Completed
-
-foreach ($s in $siteRecords) {
-    if ($externalUserMap.ContainsKey($s.Url)) {
-        $s | Add-Member -NotePropertyName ExternalUserCount -NotePropertyValue $externalUserMap[$s.Url] -Force
-    } else {
-        $s | Add-Member -NotePropertyName ExternalUserCount -NotePropertyValue $null -Force
+        ExternalUserCount        = $externalUserMap[$s.Url]  # may be $null if not measured
     }
 }
 
-# Build OneDrive records
 $onedriveRecords = @()
 foreach ($od in $oneDrives) {
     $onedriveRecords += [PSCustomObject]@{
@@ -173,47 +172,22 @@ foreach ($od in $oneDrives) {
         StorageUsageCurrent     = [int64]$od.StorageUsageCurrent
         LastContentModifiedDate = if ($od.LastContentModifiedDate) { $od.LastContentModifiedDate.ToString("o") } else { $null }
         LockState               = [string]$od.LockState
+        ExternalUserCount       = $externalUserMap[$od.Url]
     }
 }
 
-# Fetch external user counts for OneDrive too (smaller sample)
-$odProbe = if ($FullScan) { $onedriveRecords } else {
-    @($onedriveRecords | Sort-Object -Property StorageUsageCurrent -Descending | Select-Object -First $ExternalUserSampleSize)
-}
-Write-Host ""
-Write-Host "        Fetching OneDrive external user counts for $($odProbe.Count) account(s)..." -ForegroundColor Gray
-$idx = 0
-foreach ($od in $odProbe) {
-    $idx++
-    if (($idx % 5) -eq 0 -or $idx -eq $odProbe.Count) {
-        Write-ProgressBar -Current $idx -Total $odProbe.Count -Activity "OneDrive external users" -Status $od.Owner
-    }
-    try {
-        $ext = @(Get-SPOUser -Site $od.Url -Limit All -ErrorAction Stop | Where-Object { $_.IsExternalUser })
-        $od | Add-Member -NotePropertyName ExternalUserCount -NotePropertyValue $ext.Count -Force
-    } catch {
-        $od | Add-Member -NotePropertyName ExternalUserCount -NotePropertyValue $null -Force
-    }
-}
-Write-Progress -Activity "OneDrive external users" -Completed
-
-foreach ($od in $onedriveRecords) {
-    if (-not ($od.PSObject.Properties['ExternalUserCount'])) {
-        $od | Add-Member -NotePropertyName ExternalUserCount -NotePropertyValue $null -Force
-    }
-}
-
-# Tenant baseline (for comparing per-site sharing to tenant default)
+# Tenant baseline
 try {
-    $tenantCfg = Get-SPOTenant
+    $tenantCfg = Get-PnPTenant
     $tenantBaseline = [PSCustomObject]@{
         SharingCapability       = [string]$tenantCfg.SharingCapability
         DefaultSharingLinkType  = [string]$tenantCfg.DefaultSharingLinkType
         DefaultLinkPermission   = [string]$tenantCfg.DefaultLinkPermission
+        TenantExternalUserTotal = $tenantExternalTotal
     }
 } catch {
     $tenantBaseline = [PSCustomObject]@{
-        SharingCapability = "Unknown"; DefaultSharingLinkType = "Unknown"; DefaultLinkPermission = "Unknown"
+        SharingCapability = "Unknown"; DefaultSharingLinkType = "Unknown"; DefaultLinkPermission = "Unknown"; TenantExternalUserTotal = $null
     }
 }
 
@@ -228,36 +202,29 @@ try {
     $groups = @()
 }
 
-# Classify: M365 group if groupTypes contains 'Unified'; Team if resourceProvisioningOptions contains 'Team'
 $groupRecords = @()
 $teamRecords  = @()
 foreach ($g in $groups) {
     $isUnified = @($g.groupTypes) -contains 'Unified'
     $isTeam    = @($g.resourceProvisioningOptions) -contains 'Team'
     $labelIds  = @()
-    if ($g.assignedLabels) {
-        $labelIds = @($g.assignedLabels | ForEach-Object { $_.labelId })
-    }
+    if ($g.assignedLabels) { $labelIds = @($g.assignedLabels | ForEach-Object { $_.labelId }) }
     $rec = [PSCustomObject]@{
-        Id                = [string]$g.id
-        DisplayName       = [string]$g.displayName
-        Mail              = [string]$g.mail
-        Visibility        = [string]$g.visibility
-        Created           = [string]$g.createdDateTime
-        AssignedLabelIds  = $labelIds
+        Id                  = [string]$g.id
+        DisplayName         = [string]$g.displayName
+        Mail                = [string]$g.mail
+        Visibility          = [string]$g.visibility
+        Created             = [string]$g.createdDateTime
+        AssignedLabelIds    = $labelIds
         HasSensitivityLabel = ($labelIds.Count -gt 0)
-        GuestCount        = 0   # populated below
-        MemberCount       = 0
-        IsTeam            = $isTeam
+        GuestCount          = 0
+        MemberCount         = 0
+        IsTeam              = $isTeam
     }
-    if ($isTeam) {
-        $teamRecords += $rec
-    } elseif ($isUnified) {
-        $groupRecords += $rec
-    }
+    if ($isTeam)        { $teamRecords += $rec }
+    elseif ($isUnified) { $groupRecords += $rec }
 }
 
-# For each M365 group + team, fetch guest member count (only if group has a sensitivity label gap — probe everyone in sample mode, or all in full)
 $probeSet = @($groupRecords + $teamRecords)
 Write-Host "        Fetching member + guest counts for $($probeSet.Count) group(s)/team(s)..." -ForegroundColor Gray
 $idx = 0
@@ -271,18 +238,16 @@ foreach ($g in $probeSet) {
         $g.MemberCount = $members.Count
         $g.GuestCount  = @($members | Where-Object { $_.userType -eq 'Guest' }).Count
     } catch {
-        # Skip errors silently
+        # Ignore missing-member errors per group
     }
 }
 Write-Progress -Activity "Group members" -Completed
 
-# ── Fetch sensitivity label catalog (for name lookup in the report) ──
+# Sensitivity label catalog (optional)
 $labelCatalog = @()
 try {
     $labelCatalog = Invoke-GraphPaged "https://graph.microsoft.com/beta/security/informationProtection/sensitivityLabels?`$top=999"
-} catch {
-    # Optional — tenant may not have labels configured
-}
+} catch {}
 
 # ── Save JSON artifacts ──
 $ctxExport = @{
@@ -290,15 +255,16 @@ $ctxExport = @{
     ExportedAt   = (Get-Date).ToString("o")
     RunBy        = $ctx.Account
     Mode         = if ($FullScan) { "FullScan" } else { "Sample-$SampleSize" }
+    Module       = "PnP.PowerShell"
 }
 
-$siteRecords    | ConvertTo-Json -Depth 6 | Out-File -FilePath (Join-Path $OutputFolder "sites.json")          -Encoding UTF8
-$onedriveRecords| ConvertTo-Json -Depth 6 | Out-File -FilePath (Join-Path $OutputFolder "onedrives.json")      -Encoding UTF8
-$groupRecords   | ConvertTo-Json -Depth 6 | Out-File -FilePath (Join-Path $OutputFolder "groups.json")         -Encoding UTF8
-$teamRecords    | ConvertTo-Json -Depth 6 | Out-File -FilePath (Join-Path $OutputFolder "teams.json")          -Encoding UTF8
-$tenantBaseline | ConvertTo-Json -Depth 3 | Out-File -FilePath (Join-Path $OutputFolder "tenant-baseline.json") -Encoding UTF8
+$siteRecords    | ConvertTo-Json -Depth 6 | Out-File -FilePath (Join-Path $OutputFolder "sites.json")             -Encoding UTF8
+$onedriveRecords| ConvertTo-Json -Depth 6 | Out-File -FilePath (Join-Path $OutputFolder "onedrives.json")         -Encoding UTF8
+$groupRecords   | ConvertTo-Json -Depth 6 | Out-File -FilePath (Join-Path $OutputFolder "groups.json")            -Encoding UTF8
+$teamRecords    | ConvertTo-Json -Depth 6 | Out-File -FilePath (Join-Path $OutputFolder "teams.json")             -Encoding UTF8
+$tenantBaseline | ConvertTo-Json -Depth 3 | Out-File -FilePath (Join-Path $OutputFolder "tenant-baseline.json")    -Encoding UTF8
 $labelCatalog   | ConvertTo-Json -Depth 4 | Out-File -FilePath (Join-Path $OutputFolder "sensitivity-labels.json") -Encoding UTF8
-$ctxExport      | ConvertTo-Json -Depth 2 | Out-File -FilePath (Join-Path $OutputFolder "export-context.json")  -Encoding UTF8
+$ctxExport      | ConvertTo-Json -Depth 2 | Out-File -FilePath (Join-Path $OutputFolder "export-context.json")     -Encoding UTF8
 
 Write-Host ""
 Write-Host "  Export complete. Data saved in: $OutputFolder" -ForegroundColor Green
@@ -309,5 +275,5 @@ Write-Host "    teams.json           : $($teamRecords.Count) teams" -ForegroundC
 Write-Host "    tenant-baseline.json : tenant default sharing baseline" -ForegroundColor Gray
 Write-Host "    sensitivity-labels.json : $($labelCatalog.Count) label(s)" -ForegroundColor Gray
 
-try { Disconnect-SPOService -ErrorAction SilentlyContinue } catch {}
+try { Disconnect-PnPOnline -ErrorAction SilentlyContinue } catch {}
 try { Disconnect-MgGraph -ErrorAction SilentlyContinue } catch {}

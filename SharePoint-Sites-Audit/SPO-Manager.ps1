@@ -35,18 +35,18 @@ if ($PSVersionTable.PSVersion.Major -lt 7) {
   return
 }
 
-# 2. Microsoft.Online.SharePoint.PowerShell module
-if (-not (Get-Module -ListAvailable -Name Microsoft.Online.SharePoint.PowerShell)) {
+# 2. PnP.PowerShell module (cross-platform SharePoint admin — works on Windows, macOS, Linux)
+if (-not (Get-Module -ListAvailable -Name PnP.PowerShell)) {
   Write-Host ""
-  Write-Host "  [!] Microsoft.Online.SharePoint.PowerShell module is not installed." -ForegroundColor Red
+  Write-Host "  [!] PnP.PowerShell module is not installed." -ForegroundColor Red
   Write-Host ""
   $installChoice = Read-Host "  Would you like to install it now? (Y/n)"
   if ($installChoice -eq 'n' -or $installChoice -eq 'N') {
-    Write-Host "  Cannot continue without the SPO module. Exiting." -ForegroundColor Red
+    Write-Host "  Cannot continue without PnP.PowerShell. Exiting." -ForegroundColor Red
     return
   }
-  Write-Host "  Installing Microsoft.Online.SharePoint.PowerShell..." -ForegroundColor Yellow
-  Install-Module Microsoft.Online.SharePoint.PowerShell -Scope CurrentUser -Force -AllowClobber
+  Write-Host "  Installing PnP.PowerShell (this may take a few minutes)..." -ForegroundColor Yellow
+  Install-Module PnP.PowerShell -Scope CurrentUser -Force -AllowClobber
   Write-Host "  Installed." -ForegroundColor Green
 }
 
