@@ -1,0 +1,24 @@
+# Tenant-specific data — never commit
+tenants/
+data/
+reports/
+output/
+
+# Generated artifacts (Excel, CSV, logs)
+*.xlsx
+*.csv
+*.log
+*.json
+
+# Secrets / credentials — never commit
+*.pfx
+*.pem
+*.key
+.env*
+credentials.*
+secret.*
+token.*
+
+# OS
+.DS_Store
+Thumbs.db
