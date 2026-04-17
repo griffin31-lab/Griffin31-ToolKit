@@ -65,38 +65,18 @@ try {
     exit 1
 }
 
-# ── Phase 2: Connect to Microsoft Graph (cert-based, same app, silent) ──
+# ── Phase 2: Obtain a Graph token via PnP (avoids MSAL assembly conflict) ──
+# Microsoft.Graph module and PnP.PowerShell ship incompatible versions of
+# Microsoft.Identity.Client.dll; loading both in the same process throws
+# "Could not load type 'IMsalSFHttpClientFactory'". We skip Connect-MgGraph
+# and call Graph via Invoke-RestMethod using a token minted by PnP.
 Write-Host ""
-Write-Host "  [2/4] Connecting to Microsoft Graph (cert auth — silent)..." -ForegroundColor Cyan
-
-# Resolve TenantId (needed for Graph cert auth)
-$tenantId = $null
+Write-Host "  [2/4] Obtaining Graph token via PnP (cert auth — silent)..." -ForegroundColor Cyan
 try {
-    # Derive from PnP connection: the tenant GUID is available via Get-PnPTenantId or similar
-    $tenantId = (Get-PnPTenantId -ErrorAction Stop)
+    $script:graphToken = Get-PnPAccessToken -ResourceTypeName Graph -ErrorAction Stop
+    Write-Host "        Graph token acquired" -ForegroundColor Green
 } catch {
-    # Fallback: look up via OpenID discovery
-    try {
-        $disc = Invoke-RestMethod -Uri "https://login.microsoftonline.com/$TenantDomain/v2.0/.well-known/openid-configuration"
-        if ($disc.issuer -match 'sts\.windows\.net/([0-9a-f-]{36})') { $tenantId = $Matches[1] }
-    } catch {}
-}
-if (-not $tenantId) {
-    Write-Host "        [!] Could not determine Tenant ID." -ForegroundColor Red
-    exit 1
-}
-
-try {
-    # Use the same PFX cert. Graph module accepts -CertificateThumbprint or -Certificate (X509Certificate2 object).
-    Add-Type -AssemblyName System.Security
-    $plainPw = [System.Net.NetworkCredential]::new("", $securePw).Password
-    $certObj = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 $certPath, $plainPw
-    Connect-MgGraph -ClientId $clientId -TenantId $tenantId -Certificate $certObj -NoWelcome
-    $ctx = Get-MgContext
-    if (-not $ctx) { throw "Graph context not established." }
-    Write-Host "        Connected as app $clientId (app-only)" -ForegroundColor Green
-} catch {
-    Write-Host "        [!] Graph connection failed: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "        [!] Failed to obtain Graph token: $($_.Exception.Message)" -ForegroundColor Red
     try { Disconnect-PnPOnline -ErrorAction SilentlyContinue } catch {}
     exit 1
 }
@@ -106,9 +86,10 @@ function Invoke-GraphPaged {
     param([string]$Uri)
     $all = @()
     $next = $Uri
+    $headers = @{ Authorization = "Bearer $script:graphToken" }
     while ($next) {
         try {
-            $resp = Invoke-MgGraphRequest -Method GET -Uri $next -ErrorAction Stop
+            $resp = Invoke-RestMethod -Method GET -Uri $next -Headers $headers -ErrorAction Stop
         } catch {
             Write-Host "        [!] Graph request failed for $next : $($_.Exception.Message)" -ForegroundColor Red
             throw
@@ -136,7 +117,7 @@ try {
 } catch {
     Write-Host "        [!] Get-PnPTenantSite failed: $($_.Exception.Message)" -ForegroundColor Red
     try { Disconnect-PnPOnline -ErrorAction SilentlyContinue } catch {}
-    try { Disconnect-MgGraph -ErrorAction SilentlyContinue } catch {}
+    
     exit 1
 }
 
@@ -289,7 +270,7 @@ try {
 $ctxExport = @{
     TenantDomain = $TenantDomain
     ExportedAt   = (Get-Date).ToString("o")
-    RunBy        = if ($ctx.Account) { $ctx.Account } else { "AppOnly:$clientId" }
+    RunBy        = "AppOnly:$clientId"
     Mode         = if ($FullScan) { "FullScan" } else { "Sample-$SampleSize" }
     Module       = "PnP.PowerShell"
 }
@@ -312,4 +293,4 @@ Write-Host "    tenant-baseline.json : tenant default sharing baseline" -Foregro
 Write-Host "    sensitivity-labels.json : $($labelCatalog.Count) label(s)" -ForegroundColor Gray
 
 try { Disconnect-PnPOnline -ErrorAction SilentlyContinue } catch {}
-try { Disconnect-MgGraph -ErrorAction SilentlyContinue } catch {}
+
