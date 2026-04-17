@@ -118,6 +118,13 @@ try {
     }
     $thumbprint = $cert.Thumbprint
     $certBase64 = [Convert]::ToBase64String($cert.RawData)
+
+    # Restrict PFX to user-only (0600). On Windows this is a no-op (ACLs handle it);
+    # on macOS/Linux it prevents other local users from reading the private key.
+    if (-not ($IsWindows -or $env:OS -match 'Windows')) {
+        try { & chmod 600 $pfxPath 2>$null } catch {}
+    }
+
     Write-Host "        Cert thumbprint: $thumbprint" -ForegroundColor Green
     Write-Host "        PFX saved to:    $pfxPath" -ForegroundColor Green
 } catch {
@@ -154,7 +161,11 @@ function Get-AppRoleId {
 
 try {
     $graphPermNames = @('Group.Read.All','Directory.Read.All','InformationProtectionPolicy.Read.All','Sites.Read.All')
-    $spoPermNames   = @('Sites.FullControl.All','User.Read.All')
+    # Sites.FullControl.All is required by Microsoft for app-only calls to SPO admin endpoints
+    # (Get-PnPTenantSite, Get-PnPExternalUser). Microsoft does not honor a read-only variant for
+    # these operations. Documented in the README.
+    # User.Read.All has been removed — we don't enumerate users via SPO.
+    $spoPermNames   = @('Sites.FullControl.All')
     $graphRoleIds   = $graphPermNames | ForEach-Object { Get-AppRoleId -servicePrincipal $graphSP -roleName $_ }
     $spoRoleIds     = $spoPermNames   | ForEach-Object { Get-AppRoleId -servicePrincipal $spoSP   -roleName $_ }
     Write-Host "        Resolved $($graphRoleIds.Count) Graph + $($spoRoleIds.Count) SPO role IDs" -ForegroundColor Green
@@ -278,6 +289,10 @@ $config = @{
     AuthMode              = "CertificateAppOnly"
 }
 $config | ConvertTo-Json -Depth 3 | Out-File -FilePath $ConfigPath -Encoding UTF8
+# Restrict config to user-only (contains encrypted cert password)
+if (-not ($IsWindows -or $env:OS -match 'Windows')) {
+    try { & chmod 600 $ConfigPath 2>$null } catch {}
+}
 
 Write-Host ""
 Write-Host "  Setup complete." -ForegroundColor Green

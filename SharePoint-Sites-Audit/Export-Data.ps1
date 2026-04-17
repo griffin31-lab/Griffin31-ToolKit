@@ -116,6 +116,9 @@ try {
         Write-Host "        Configured Entra app no longer exists — preparing to re-register." -ForegroundColor Yellow
         try {
             $configDir = Split-Path $ConfigPath -Parent
+            # Clean up older stale backups (keep only the one we're about to create)
+            Get-ChildItem -Path $configDir -Filter "config.json.bak-*" -ErrorAction SilentlyContinue |
+                Remove-Item -Force -ErrorAction SilentlyContinue
             $backupPath = "$ConfigPath.bak-$(Get-Date -Format 'yyyyMMddHHmmss')"
             if (Test-Path $ConfigPath) { Move-Item -Path $ConfigPath -Destination $backupPath -Force | Out-Null }
             $certFolder = Join-Path $configDir "cert"

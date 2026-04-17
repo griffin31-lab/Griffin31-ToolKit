@@ -148,12 +148,12 @@ if ($insights -and $insights.Entities) {
 
         $metaChips = ""
         if ($e.EntityType -in @('Site','OneDrive')) {
-            if ($e.StorageBytes) { $metaChips += "<span class='meta-chip'>Storage: $(FormatBytes $e.StorageBytes)</span>" }
+            if ($e.StorageBytes) { $metaChips += "<span class='meta-chip'>Storage: $(HtmlEncode (FormatBytes $e.StorageBytes))</span>" }
             if ($e.Meta -and $e.Meta.SharingCap)     { $metaChips += "<span class='meta-chip'>Sharing: $(HtmlEncode $e.Meta.SharingCap)</span>" }
-            if ($e.Meta -and $null -ne $e.Meta.ExternalCount) { $metaChips += "<span class='meta-chip'>External users: $($e.Meta.ExternalCount)</span>" }
+            if ($e.Meta -and $null -ne $e.Meta.ExternalCount) { $metaChips += "<span class='meta-chip'>External users: $(HtmlEncode $e.Meta.ExternalCount)</span>" }
         } else {
-            if ($e.Meta -and $e.Meta.MemberCount) { $metaChips += "<span class='meta-chip'>Members: $($e.Meta.MemberCount)</span>" }
-            if ($e.Meta -and $e.Meta.GuestCount)  { $metaChips += "<span class='meta-chip'>Guests: $($e.Meta.GuestCount)</span>" }
+            if ($e.Meta -and $e.Meta.MemberCount) { $metaChips += "<span class='meta-chip'>Members: $(HtmlEncode $e.Meta.MemberCount)</span>" }
+            if ($e.Meta -and $e.Meta.GuestCount)  { $metaChips += "<span class='meta-chip'>Guests: $(HtmlEncode $e.Meta.GuestCount)</span>" }
             if ($e.Meta -and $e.Meta.Visibility)  { $metaChips += "<span class='meta-chip'>$(HtmlEncode $e.Meta.Visibility)</span>" }
         }
 
@@ -175,7 +175,9 @@ if ($insights -and $insights.Entities) {
 </tr>
 "@
     }
-    $detailsMapJson = ($detailsMap | ConvertTo-Json -Compress)
+    # Escape </ sequences to prevent script-block breakout via malicious entity names
+    # (e.g., a site titled "Foo</script><img src=x onerror=...>")
+    $detailsMapJson = (($detailsMap | ConvertTo-Json -Compress) -replace '</', '<\/')
 } else {
     $entityRowsHtml = "<tr><td colspan='5' class='empty'>No entities with findings.</td></tr>"
     $detailsMapJson = "{}"
