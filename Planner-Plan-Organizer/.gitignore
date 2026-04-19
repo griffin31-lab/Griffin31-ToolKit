@@ -1,0 +1,25 @@
+# Tenant-specific data — never commit
+tenants/
+data/
+reports/
+output/
+
+# Generated artifacts (backup exports)
+planner-backup_*.json
+*.json
+*.csv
+*.log
+*.xlsx
+
+# Secrets / credentials — never commit
+*.pfx
+*.pem
+*.key
+.env*
+credentials.*
+secret.*
+token.*
+
+# OS
+.DS_Store
+Thumbs.db

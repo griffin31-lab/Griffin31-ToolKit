@@ -11,7 +11,7 @@
 
 <p>
   <a href="https://github.com/griffin31-lab/Griffin31-ToolKit/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/griffin31-lab/Griffin31-ToolKit?style=for-the-badge&color=4472C4&labelColor=1B2A4A"/></a>
-  <img alt="Tools" src="https://img.shields.io/badge/Tools-8-4472C4?style=for-the-badge&labelColor=1B2A4A"/>
+  <img alt="Tools" src="https://img.shields.io/badge/Tools-9-4472C4?style=for-the-badge&labelColor=1B2A4A"/>
   <a href="https://github.com/griffin31-lab/Griffin31-ToolKit/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/badge/License-MIT-4472C4?style=for-the-badge&labelColor=1B2A4A"/></a>
   <img alt="PowerShell" src="https://img.shields.io/badge/PowerShell-7.x-4472C4?style=for-the-badge&labelColor=1B2A4A&logo=powershell&logoColor=white"/>
 </p>
@@ -76,6 +76,7 @@ Every tool follows the same principles — **one problem, one tool**; **safe by 
 | Clean up unused app registrations | [Entra-StaleApps-Cleanup](Entra-StaleApps-Cleanup/) | Excel + actions |
 | Catch expiring app credentials before they break production | [Entra-AppCredentials-Audit](Entra-AppCredentials-Audit/) | Excel |
 | Scope Exchange Online app permissions to specific mailboxes | [EXO-AppPermissions-Manager](EXO-AppPermissions-Manager/) | Interactive |
+| Sort, dedupe, and clean up buckets in a Microsoft Planner plan | [Planner-Plan-Organizer](Planner-Plan-Organizer/) | Interactive |
 | Validate an SPF record against the 10-lookup RFC limit | [SPF-Lookup-Validator](SPF-Lookup-Validator/) | Console |
 
 ★ = flagship tool with rich HTML report
@@ -117,6 +118,10 @@ Iterates every site, OneDrive, M365 group, and Team. Runs 14 per-entity security
 **[EXO-AppPermissions-Manager](EXO-AppPermissions-Manager/)** &nbsp;·&nbsp; *Exchange Online app-to-mailbox scoping*
 Creates management scopes, assigns roles, and verifies configuration in one flow. Supports all 13 Exchange application roles and every mailbox type.
 <sub>`Exchange Online` · `RBAC` · `Mailbox Scoping`</sub>
+
+**[Planner-Plan-Organizer](Planner-Plan-Organizer/)** &nbsp;·&nbsp; *Sort, dedupe, and clean up Planner buckets*
+Interactive organizer for any Microsoft Planner plan — sort buckets A-Z, merge duplicates, delete empty or stale buckets, and export a local JSON backup. Every destructive action previews first and requires a typed confirmation.
+<sub>`Planner` · `M365 Groups` · `Cleanup`</sub>
 
 ### Email Security
 
