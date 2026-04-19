@@ -125,9 +125,21 @@ if ($insights -and $insights.Entities) {
 
         $findingsList = ""
         foreach ($f in @($e.Findings)) {
+            $cat = if ($f.PSObject.Properties.Name -contains 'Category' -and $f.Category) { [string]$f.Category } else { 'Security' }
+            $catPill = if ($cat -eq 'Data Management') {
+                "<span class='cat-pill cat-dm'>Data Management</span>"
+            } else {
+                "<span class='cat-pill cat-sec'>Security</span>"
+            }
+            $borderColor = if ($cat -eq 'Data Management') {
+                # Data-management findings use a muted teal bar regardless of severity
+                '#0E7490'
+            } else {
+                switch ($f.Severity) { 'High' { '#B91C1C' } 'Medium' { '#D97706' } default { '#2563EB' } }
+            }
             $findingsList += @"
-<div class='finding-row' style='border-left-color:$(switch ($f.Severity) { 'High' { '#B91C1C' } 'Medium' { '#D97706' } default { '#2563EB' } })'>
-  <div class='finding-head'>$(SeverityPill $f.Severity) <span class='finding-id'>$(HtmlEncode $f.Id)</span> <span class='finding-title'>$(HtmlEncode $f.Title)</span></div>
+<div class='finding-row' style='border-left-color:$borderColor'>
+  <div class='finding-head'>$(SeverityPill $f.Severity) $catPill <span class='finding-id'>$(HtmlEncode $f.Id)</span> <span class='finding-title'>$(HtmlEncode $f.Title)</span></div>
   <div class='finding-details'><strong>Finding:</strong> $(HtmlEncode $f.Details)</div>
   <div class='finding-rem'><strong>Remediation:</strong> $(HtmlEncode $f.Remediation)</div>
 </div>
@@ -541,6 +553,16 @@ $html = @"
   .sev-pill { text-transform: uppercase; letter-spacing: 0.5px; }
   .type-badge { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
   .score-badge { font-family: 'IBM Plex Mono', monospace; min-width: 36px; text-align: center; }
+
+  /* Category pill — distinguishes security findings from data-management/governance findings.
+     Data-management uses a calmer teal to signal "policy gap, not direct security control". */
+  .cat-pill {
+    display: inline-block; padding: 2px 8px; border-radius: 4px;
+    font-size: 10px; font-weight: 600; letter-spacing: 0.5px;
+    text-transform: uppercase; border: 1px solid;
+  }
+  .cat-pill.cat-sec { color: #1D4ED8; background: #EFF6FF; border-color: #BFDBFE; }
+  .cat-pill.cat-dm  { color: #0E7490; background: #ECFEFF; border-color: #A5F3FC; }
 
   .empty { color: var(--muted); font-style: italic; padding: 20px; text-align: center; }
 

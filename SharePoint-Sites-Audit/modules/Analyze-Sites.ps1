@@ -140,6 +140,35 @@ foreach ($s in $sites) {
         }
     }
 
+    # Check 9: Copilot content restriction not configured (Data Management — SAM / E5 Copilot PRO feature)
+    if ($s.PSObject.Properties.Name -contains 'RestrictContentOrgWideSearch' -and
+        $null -ne $s.RestrictContentOrgWideSearch -and
+        $s.RestrictContentOrgWideSearch -eq $false) {
+        $siteFindings += [PSCustomObject]@{
+            Id = "SP-009"
+            Title = "Site content not restricted from Microsoft 365 Copilot"
+            Severity = "Low"
+            Category = "Data Management"
+            Details = "Any authenticated user with site access can surface site content through Microsoft 365 Copilot responses."
+            Remediation = "Enable 'Restrict content from Microsoft 365 Copilot' on sites containing sensitive data. Requires SharePoint Advanced Management (SAM) license."
+        }
+    }
+
+    # Check 10: Restricted Access Control not configured (Data Management — SAM PRO feature)
+    if ($s.PSObject.Properties.Name -contains 'RestrictedAccessControl' -and
+        $s.RestrictedAccessControl -eq $false -and
+        $s.SharingCapability -eq 'ExternalUserAndGuestSharing') {
+        # Only flag for sites that ALSO have permissive sharing — otherwise it's not a gap worth calling out
+        $siteFindings += [PSCustomObject]@{
+            Id = "SP-010"
+            Title = "Restricted Access Control not set on permissive site"
+            Severity = "Low"
+            Category = "Data Management"
+            Details = "Site allows Anyone-link sharing and has no Restricted Access Control group list — no guardrail on who can be granted access."
+            Remediation = "Apply Restricted Access Control with an allow-list of Entra ID groups. Requires SharePoint Advanced Management (SAM) license."
+        }
+    }
+
     if ($siteFindings.Count -gt 0) {
         $findings += [PSCustomObject]@{
             EntityType    = "Site"

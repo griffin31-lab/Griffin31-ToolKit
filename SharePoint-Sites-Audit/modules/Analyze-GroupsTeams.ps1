@@ -36,6 +36,30 @@ foreach ($g in @($groups)) {
         }
     }
 
+    # Check GT-014 (Data Management): external senders allowed
+    if ($g.PSObject.Properties.Name -contains 'AllowExternalSenders' -and $g.AllowExternalSenders -eq $true) {
+        $groupFindings += [PSCustomObject]@{
+            Id = "GT-014"
+            Title = "Group accepts email from external senders"
+            Severity = "Low"
+            Category = "Data Management"
+            Details = "Any internet sender can email this group — phishing payload can land directly in the group inbox / Teams conversation."
+            Remediation = "Admin center > Teams &amp; Groups > Group > Settings > uncheck 'Let people outside the organization email this team'."
+        }
+    }
+
+    # Check GT-015 (Data Management): auto-subscribe new members to conversations
+    if ($g.PSObject.Properties.Name -contains 'AutoSubscribeNewMembers' -and $g.AutoSubscribeNewMembers -eq $true) {
+        $groupFindings += [PSCustomObject]@{
+            Id = "GT-015"
+            Title = "Group auto-subscribes new members to all conversations"
+            Severity = "Low"
+            Category = "Data Management"
+            Details = "Every new member automatically receives all inbound group email in their personal inbox — widens blast radius of malicious messages and complicates offboarding."
+            Remediation = "Admin center > Teams &amp; Groups > Group > Settings > uncheck 'Send copies of team emails and events to team members' inboxes'."
+        }
+    }
+
     if ($groupFindings.Count -gt 0) {
         $findings += [PSCustomObject]@{
             EntityType    = "Group"
@@ -72,6 +96,31 @@ foreach ($t in @($teams)) {
             }
         }
     }
+
+    # Check GT-016 (Data Management): members can edit their own messages
+    if ($t.PSObject.Properties.Name -contains 'AllowUserEditMessages' -and $t.AllowUserEditMessages -eq $true) {
+        $teamFindings += [PSCustomObject]@{
+            Id = "GT-016"
+            Title = "Team allows members to edit their sent messages"
+            Severity = "Low"
+            Category = "Data Management"
+            Details = "A compromised user (or a malicious insider) can silently rewrite past messages to remove phishing links or alter instructions — breaks the forensic evidence trail."
+            Remediation = "Teams admin center > Messaging policies > set 'Owners can delete sent messages' / 'Users can edit sent messages' to Off for sensitive teams."
+        }
+    }
+
+    # Check GT-017 (Data Management): members can delete their own messages
+    if ($t.PSObject.Properties.Name -contains 'AllowUserDeleteMessages' -and $t.AllowUserDeleteMessages -eq $true) {
+        $teamFindings += [PSCustomObject]@{
+            Id = "GT-017"
+            Title = "Team allows members to delete their sent messages"
+            Severity = "Low"
+            Category = "Data Management"
+            Details = "A compromised user can remove evidence of phishing delivery or lateral movement inside Teams channels — hinders incident response investigation."
+            Remediation = "Teams admin center > Messaging policies > set 'Users can delete sent messages' to Off for sensitive teams."
+        }
+    }
+
     if ($teamFindings.Count -gt 0) {
         $findings += [PSCustomObject]@{
             EntityType    = "Team"

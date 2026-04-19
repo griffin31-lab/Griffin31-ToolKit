@@ -289,19 +289,34 @@ try {
 # Build site records
 $siteRecords = @()
 foreach ($s in $nonPersonal) {
+    # Data-management properties (may not exist on older PnP versions — safe-get with try)
+    $restrictCopilot = $null
+    $racGroupIds     = @()
+    try { $restrictCopilot = [bool]$s.RestrictContentOrgWideSearch } catch {}
+    try {
+        if ($s.PSObject.Properties.Name -contains 'RestrictedAccessControl') {
+            if ($s.RestrictedAccessControl) {
+                $racGroupIds = @($s.RestrictedAccessControlGroups | ForEach-Object { [string]$_ })
+            }
+        }
+    } catch {}
     $siteRecords += [PSCustomObject]@{
-        Url                      = $s.Url
-        Title                    = $s.Title
-        Template                 = $s.Template
-        Owner                    = $s.Owner
-        SharingCapability        = [string]$s.SharingCapability
-        StorageUsageCurrent      = [int64]$s.StorageUsageCurrent
-        LastContentModifiedDate  = if ($s.LastContentModifiedDate) { $s.LastContentModifiedDate.ToString("o") } else { $null }
-        LockState                = [string]$s.LockState
-        SensitivityLabel         = [string]$s.SensitivityLabel
-        GroupId                  = [string]$s.GroupId
-        IsHubSite                = [bool]$s.IsHubSite
-        ExternalUserCount        = $externalUserMap[$s.Url]  # may be $null if not measured
+        Url                        = $s.Url
+        Title                      = $s.Title
+        Template                   = $s.Template
+        Owner                      = $s.Owner
+        SharingCapability          = [string]$s.SharingCapability
+        StorageUsageCurrent        = [int64]$s.StorageUsageCurrent
+        LastContentModifiedDate    = if ($s.LastContentModifiedDate) { $s.LastContentModifiedDate.ToString("o") } else { $null }
+        LockState                  = [string]$s.LockState
+        SensitivityLabel           = [string]$s.SensitivityLabel
+        GroupId                    = [string]$s.GroupId
+        IsHubSite                  = [bool]$s.IsHubSite
+        ExternalUserCount          = $externalUserMap[$s.Url]
+        # Data-management controls (SharePoint Advanced Management / E5 Copilot)
+        RestrictContentOrgWideSearch = $restrictCopilot  # Copilot content restriction
+        RestrictedAccessControl      = [bool]($racGroupIds.Count -gt 0)
+        RACGroupIds                  = $racGroupIds
     }
 }
 
@@ -373,7 +388,7 @@ foreach ($g in $groups) {
 }
 
 $probeSet = @($groupRecords + $teamRecords)
-Write-Host "        Fetching member + guest counts for $($probeSet.Count) group(s)/team(s)..." -ForegroundColor Gray
+Write-Host "        Fetching member + guest counts + data-mgmt props for $($probeSet.Count) group(s)/team(s)..." -ForegroundColor Gray
 $idx = 0
 foreach ($g in $probeSet) {
     $idx++
@@ -387,8 +402,41 @@ foreach ($g in $probeSet) {
     } catch {
         # Ignore missing-member errors per group
     }
+
+    # Data-management: allowExternalSenders + autoSubscribeNewMembers (not selectable in list call)
+    $g | Add-Member -NotePropertyName AllowExternalSenders      -NotePropertyValue $null -Force
+    $g | Add-Member -NotePropertyName AutoSubscribeNewMembers   -NotePropertyValue $null -Force
+    try {
+        $ext = Invoke-RestMethod -Method GET `
+            -Uri "https://graph.microsoft.com/v1.0/groups/$($g.Id)?`$select=allowExternalSenders,autoSubscribeNewMembers" `
+            -Headers @{ Authorization = "Bearer $script:graphToken" } -ErrorAction Stop
+        $g.AllowExternalSenders    = [bool]$ext.allowExternalSenders
+        $g.AutoSubscribeNewMembers = [bool]$ext.autoSubscribeNewMembers
+    } catch { }
 }
 Write-Progress -Activity "Group members" -Completed
+
+# Per-team messaging settings (edit/delete own messages)
+Write-Host "        Fetching Teams messaging settings for $($teamRecords.Count) team(s)..." -ForegroundColor Gray
+$idx = 0
+foreach ($t in $teamRecords) {
+    $idx++
+    if (($idx % 10) -eq 0 -or $idx -eq $teamRecords.Count) {
+        Write-ProgressBar -Current $idx -Total $teamRecords.Count -Activity "Teams messaging" -Status $t.DisplayName
+    }
+    $t | Add-Member -NotePropertyName AllowUserEditMessages   -NotePropertyValue $null -Force
+    $t | Add-Member -NotePropertyName AllowUserDeleteMessages -NotePropertyValue $null -Force
+    try {
+        $tset = Invoke-RestMethod -Method GET `
+            -Uri "https://graph.microsoft.com/v1.0/teams/$($t.Id)?`$select=messagingSettings" `
+            -Headers @{ Authorization = "Bearer $script:graphToken" } -ErrorAction Stop
+        if ($tset.messagingSettings) {
+            $t.AllowUserEditMessages   = [bool]$tset.messagingSettings.allowUserEditMessages
+            $t.AllowUserDeleteMessages = [bool]$tset.messagingSettings.allowUserDeleteMessages
+        }
+    } catch { }
+}
+Write-Progress -Activity "Teams messaging" -Completed
 
 # Sensitivity label catalog (optional — beta endpoint, some tenants restrict app-only access)
 $labelCatalog = @(Invoke-GraphPaged -Uri "https://graph.microsoft.com/beta/security/informationProtection/sensitivityLabels?`$top=999" -SilentFail)
