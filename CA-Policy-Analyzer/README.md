@@ -2,7 +2,7 @@
 
 > **Conditional Access posture score, policy gaps, and priority-sorted insights** — single self-contained HTML report.
 
-<sub>[← Back to Griffin31 ToolKit](../)</sub>
+<sub>[← Back to Griffin31 ToolKit](../) · Cross-platform (Windows · macOS · Linux) · PowerShell 7</sub>
 
 <p align="center">
   <img src="../.github/screenshots/ca-policy-analyzer.png" alt="CA-Policy-Analyzer report — posture score, phase breakdown, KPI row, key insights" width="100%"/>
