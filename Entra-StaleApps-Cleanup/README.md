@@ -2,7 +2,7 @@
 
 > **Find and clean up unused app registrations** — audit, disable, or delete apps that haven't signed in for X days.
 
-<sub>[← Back to Griffin31 ToolKit](../)</sub>
+<sub>[← Back to Griffin31 ToolKit](../) · Cross-platform (Windows · macOS · Linux) · PowerShell 7</sub>
 
 ---
 
