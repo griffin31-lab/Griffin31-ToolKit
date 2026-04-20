@@ -1,0 +1,21 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs and backups
+*.log
+*.bak
+
+# Local deploy artifacts / state
+*.tfstate
+*.tfstate.*
+.terraform/
+deploymentStates/
+*.deploy.json
+*.parameters.local.json
+config/local.settings.json
+local.settings.json
+
+# IDE
+.vscode/
+.idea/
