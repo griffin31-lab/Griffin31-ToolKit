@@ -2,7 +2,7 @@
 
 > **Prepare for Microsoft's May 13 2026 Conditional Access enforcement change** — Excel risk report with MFA status per app.
 
-<sub>[← Back to Griffin31 ToolKit](../)</sub>
+<sub>[← Back to Griffin31 ToolKit](../) · Cross-platform (Windows · macOS · Linux) · PowerShell 7</sub>
 
 ---
 
