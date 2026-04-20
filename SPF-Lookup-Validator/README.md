@@ -2,7 +2,7 @@
 
 > **RFC 7208-compliant SPF chain analysis** — recursively counts DNS lookups against the 10-lookup limit.
 
-<sub>[← Back to Griffin31 ToolKit](../)</sub>
+<sub>[← Back to Griffin31 ToolKit](../) · Cross-platform (Windows · macOS · Linux) · PowerShell 7</sub>
 
 ---
 
