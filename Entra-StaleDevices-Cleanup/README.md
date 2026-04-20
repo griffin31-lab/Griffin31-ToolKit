@@ -2,7 +2,7 @@
 
 > **Audit, disable, or delete stale Entra ID devices** — filter by OS and inactivity threshold, act in bulk with confirmation.
 
-<sub>[← Back to Griffin31 ToolKit](../)</sub>
+<sub>[← Back to Griffin31 ToolKit](../) · Cross-platform (Windows · macOS · Linux) · PowerShell 7</sub>
 
 ---
 
