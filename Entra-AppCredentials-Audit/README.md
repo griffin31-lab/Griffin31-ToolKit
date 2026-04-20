@@ -2,7 +2,7 @@
 
 > **Catch expired and expiring app registration credentials** — Excel report with owner + remove-expired action.
 
-<sub>[← Back to Griffin31 ToolKit](../)</sub>
+<sub>[← Back to Griffin31 ToolKit](../) · Cross-platform (Windows · macOS · Linux) · PowerShell 7</sub>
 
 ---
 
