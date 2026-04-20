@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Griffin31 ToolKit — Social Preview</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 1280px; height: 640px;
+    font-family: 'IBM Plex Sans', system-ui, sans-serif;
+    color: #fff;
+    background: #1B2A4A;
+    background-image:
+      linear-gradient(135deg, rgba(68,114,196,0.18) 0%, rgba(68,114,196,0) 55%),
+      linear-gradient(to right, rgba(255,255,255,0.045) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(255,255,255,0.045) 1px, transparent 1px);
+    background-size: 100% 100%, 48px 48px, 48px 48px;
+  }
+  .frame {
+    position: relative;
+    width: 1280px; height: 640px;
+    padding: 52px 80px 48px 80px;
+  }
+  .footer-wrap {
+    position: absolute;
+    left: 80px; right: 80px; bottom: 48px;
+    min-height: 48px;
+  }
+  .frame::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 4px;
+    background: linear-gradient(90deg, transparent 0%, #4472C4 25%, #4472C4 75%, transparent 100%);
+    opacity: 0.9;
+  }
+  .frame::after {
+    content: 'SECURITY // TOOLKIT';
+    position: absolute;
+    top: 28px; right: 80px;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 13px;
+    letter-spacing: 0.22em;
+    color: #7FA2DB;
+  }
+
+  /* Header: logo + wordmark */
+  .header { display: flex; align-items: center; gap: 20px; }
+  .logo {
+    width: 72px; height: 72px; border-radius: 16px;
+    background: #fff; padding: 6px;
+    box-shadow: 0 12px 32px rgba(68,114,196,0.35);
+  }
+  .logo img { width: 100%; height: 100%; display: block; }
+  .wordmark .w1 { font-size: 16px; font-weight: 600; letter-spacing: 0.18em; color: #7FA2DB; text-transform: uppercase; }
+  .wordmark .w2 { font-size: 30px; font-weight: 700; letter-spacing: -0.01em; line-height: 1.1; margin-top: 2px; }
+
+  /* Hero text */
+  .hero { margin-top: 26px; }
+  .hero h1 {
+    font-size: 64px;
+    font-weight: 700;
+    line-height: 1.04;
+    letter-spacing: -0.025em;
+  }
+  .hero h1 .accent { color: #7FA2DB; }
+  .hero p {
+    margin-top: 16px;
+    font-size: 20px;
+    line-height: 1.35;
+    color: rgba(255,255,255,0.78);
+    max-width: 980px;
+    font-weight: 400;
+  }
+
+  /* Tool chips */
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 4px;
+  }
+  .chip {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 13px;
+    font-weight: 500;
+    padding: 7px 14px;
+    border-radius: 999px;
+    border: 1px solid rgba(127,162,219,0.45);
+    color: #C9D7EE;
+    background: rgba(68,114,196,0.08);
+    letter-spacing: 0.02em;
+  }
+
+  /* Footer strip */
+  .footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 13px;
+    color: #7FA2DB;
+    letter-spacing: 0.05em;
+    padding-top: 20px;
+    border-top: 1px solid rgba(127,162,219,0.22);
+  }
+  .footer .count {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    font-family: 'IBM Plex Sans', sans-serif;
+    color: #fff;
+  }
+  .footer .count .big {
+    font-size: 24px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    color: #fff;
+  }
+  .footer .count .unit {
+    color: rgba(255,255,255,0.55);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.22em;
+  }
+  .footer .divider { color: rgba(255,255,255,0.25); margin: 0 6px; }
+  .footer .url { color: #7FA2DB; font-size: 14px; }
+</style>
+</head>
+<body>
+<div class="frame">
+    <div class="header">
+      <div class="logo">
+        <img src="griffin31-logo.png" alt="Griffin31"/>
+      </div>
+      <div class="wordmark">
+        <div class="w1">Griffin31</div>
+        <div class="w2">ToolKit</div>
+      </div>
+    </div>
+
+    <div class="hero">
+      <h1>Open-source security tooling<br/>for <span class="accent">Microsoft 365</span>.</h1>
+      <p>Production-grade PowerShell tools. No installers. No telemetry. Download, run, review the output.</p>
+    </div>
+
+  <div class="footer-wrap">
+    <div style="padding-top: 20px; border-top: 1px solid rgba(127,162,219,0.3); display: flex; justify-content: space-between; align-items: center; font-family: 'IBM Plex Sans', sans-serif;">
+      <div style="display: flex; align-items: baseline; gap: 10px; color: #fff; font-size: 16px;">
+        <span style="font-size: 24px; font-weight: 700;">7</span>
+        <span style="color: rgba(255,255,255,0.55); font-size: 11px; text-transform: uppercase; letter-spacing: 0.22em; font-family: 'IBM Plex Mono', monospace;">Tools</span>
+        <span style="color: rgba(255,255,255,0.25); margin: 0 8px;">·</span>
+        <span style="font-size: 24px; font-weight: 700;">MIT</span>
+        <span style="color: rgba(255,255,255,0.55); font-size: 11px; text-transform: uppercase; letter-spacing: 0.22em; font-family: 'IBM Plex Mono', monospace;">License</span>
+        <span style="color: rgba(255,255,255,0.25); margin: 0 8px;">·</span>
+        <span style="font-size: 24px; font-weight: 700;">PS 7</span>
+        <span style="color: rgba(255,255,255,0.55); font-size: 11px; text-transform: uppercase; letter-spacing: 0.22em; font-family: 'IBM Plex Mono', monospace;">PowerShell</span>
+      </div>
+      <div style="font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: #7FA2DB;">github.com/griffin31-lab/Griffin31-ToolKit</div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

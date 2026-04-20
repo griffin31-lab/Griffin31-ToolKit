@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Planner-Plan-Organizer — Social Preview</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500&family=IBM+Plex+Sans:wght@400;500;600;700&family=Caveat:wght@500&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 1200px; height: 630px;
+    font-family: 'IBM Plex Sans', system-ui, sans-serif;
+    color: #fff;
+    background: #1B2A4A;
+    background-image:
+      radial-gradient(circle at 85% 15%, rgba(68,114,196,0.25) 0%, rgba(68,114,196,0) 40%),
+      linear-gradient(135deg, rgba(68,114,196,0.12) 0%, rgba(68,114,196,0) 60%),
+      linear-gradient(to right, rgba(255,255,255,0.04) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(255,255,255,0.04) 1px, transparent 1px);
+    background-size: 100% 100%, 100% 100%, 40px 40px, 40px 40px;
+  }
+
+  .frame {
+    position: relative;
+    width: 1200px; height: 630px;
+    padding: 44px 60px 36px 60px;
+  }
+  .frame::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 4px;
+    background: linear-gradient(90deg, transparent 0%, #4472C4 25%, #4472C4 75%, transparent 100%);
+    opacity: 0.9;
+  }
+
+  /* Header */
+  .header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .brand { display: flex; align-items: center; gap: 14px; }
+  .logo {
+    width: 48px; height: 48px; border-radius: 11px;
+    background: #fff; padding: 5px;
+    box-shadow: 0 8px 20px rgba(68,114,196,0.35);
+  }
+  .logo img { width: 100%; height: 100%; display: block; }
+  .brand .title { font-size: 13px; font-weight: 600; letter-spacing: 0.18em; color: #7FA2DB; text-transform: uppercase; }
+  .brand .toolkit { font-size: 22px; font-weight: 700; letter-spacing: -0.01em; line-height: 1.1; }
+  .tag {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+    letter-spacing: 0.22em;
+    color: #7FA2DB;
+    text-transform: uppercase;
+  }
+
+  /* Hero */
+  .hero {
+    margin-top: 28px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 44px;
+    align-items: start;
+  }
+
+  .hero-left h1 {
+    font-size: 46px;
+    font-weight: 700;
+    line-height: 1.05;
+    letter-spacing: -0.02em;
+  }
+  .hero-left h1 .accent { color: #7FA2DB; }
+  .hero-left .sub {
+    margin-top: 14px;
+    font-size: 17px;
+    line-height: 1.4;
+    color: rgba(255,255,255,0.75);
+    max-width: 500px;
+  }
+  .hero-left .scribble {
+    font-family: 'Caveat', cursive;
+    font-size: 22px;
+    color: #F6C65B;
+    margin-top: 12px;
+    transform: rotate(-1.5deg);
+    display: inline-block;
+  }
+
+  /* Planner sketch */
+  .board {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(127,162,219,0.3);
+    border-radius: 12px;
+    padding: 14px;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+    margin-top: 4px;
+  }
+  .bucket {
+    background: rgba(27,42,74,0.7);
+    border: 1px solid rgba(127,162,219,0.35);
+    border-radius: 8px;
+    padding: 10px 10px 8px;
+    min-height: 150px;
+  }
+  .bucket h4 {
+    font-family: 'Caveat', cursive;
+    font-size: 19px;
+    font-weight: 500;
+    color: #C9D7EE;
+    margin-bottom: 8px;
+    letter-spacing: 0.01em;
+  }
+  .bucket.dup h4 { color: #F6C65B; }
+  .bucket.empty h4 { color: rgba(255,255,255,0.38); }
+  .bucket.empty { border-style: dashed; opacity: 0.6; }
+  .card {
+    background: rgba(255,255,255,0.08);
+    border-left: 3px solid #4472C4;
+    border-radius: 4px;
+    padding: 6px 8px;
+    margin-bottom: 6px;
+    height: 22px;
+    position: relative;
+  }
+  .card::after {
+    content: '';
+    position: absolute;
+    top: 7px; left: 12px; right: 12px;
+    height: 2px;
+    background: rgba(255,255,255,0.25);
+    border-radius: 2px;
+  }
+  .card.done { border-left-color: #3FB95A; opacity: 0.7; }
+  .card.done::after { background: rgba(255,255,255,0.15); }
+  .card.warn { border-left-color: #F6C65B; }
+
+  /* Feature row */
+  .features {
+    margin-top: 30px;
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 14px;
+  }
+  .feature {
+    background: rgba(68,114,196,0.09);
+    border: 1px solid rgba(127,162,219,0.28);
+    border-radius: 10px;
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-height: 108px;
+  }
+  .feature .icon {
+    width: 46px; height: 46px;
+    border-radius: 10px;
+    background: rgba(68,114,196,0.2);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .feature .label {
+    font-size: 15px;
+    font-weight: 600;
+    line-height: 1.25;
+    color: #fff;
+  }
+  .feature .desc {
+    font-size: 12px;
+    color: rgba(255,255,255,0.6);
+    font-family: 'IBM Plex Mono', monospace;
+    letter-spacing: 0.02em;
+  }
+
+  /* Footer */
+  .footer {
+    position: absolute;
+    left: 60px; right: 60px; bottom: 28px;
+    padding-top: 16px;
+    border-top: 1px solid rgba(127,162,219,0.25);
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+    color: #7FA2DB;
+    letter-spacing: 0.08em;
+  }
+  .footer .url { color: #7FA2DB; }
+  .footer .right {
+    color: rgba(255,255,255,0.55);
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    font-size: 11px;
+  }
+</style>
+</head>
+<body>
+<div class="frame">
+
+  <div class="header">
+    <div class="brand">
+      <div class="logo"><img src="griffin31-logo.png" alt="Griffin31"/></div>
+      <div>
+        <div class="title">Griffin31 ToolKit</div>
+        <div class="toolkit">Planner-Plan-Organizer</div>
+      </div>
+    </div>
+    <div class="tag">OPEN SOURCE // TOOL #9</div>
+  </div>
+
+  <div class="hero">
+
+    <div class="hero-left">
+      <h1>Tidy up your<br/><span class="accent">Microsoft Planner</span><br/>in one command.</h1>
+      <p class="sub">Sort, dedupe, clean, and back up any Planner plan — with previews, typed confirmations, and zero telemetry.</p>
+      <div class="scribble">…for a to-do list. Worth it.</div>
+    </div>
+
+    <div class="hero-right">
+      <div class="board">
+        <div class="bucket">
+          <h4>Backlog</h4>
+          <div class="card"></div>
+          <div class="card"></div>
+          <div class="card"></div>
+          <div class="card done"></div>
+        </div>
+        <div class="bucket dup">
+          <h4>marketing ⚠</h4>
+          <div class="card warn"></div>
+          <div class="card"></div>
+          <div class="card"></div>
+        </div>
+        <div class="bucket empty">
+          <h4>Archive 2022</h4>
+        </div>
+        <div class="bucket">
+          <h4>In Review</h4>
+          <div class="card"></div>
+          <div class="card done"></div>
+        </div>
+        <div class="bucket dup">
+          <h4>Marketing</h4>
+          <div class="card warn"></div>
+          <div class="card"></div>
+        </div>
+        <div class="bucket empty">
+          <h4>(unused)</h4>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="features">
+
+    <div class="feature">
+      <div class="icon">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#7FA2DB" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 6h13M3 12h9M3 18h5"/>
+          <path d="M19 4v16M15 16l4 4 4-4"/>
+        </svg>
+      </div>
+      <div>
+        <div class="label">Sort A-Z</div>
+        <div class="desc">server-side reorder</div>
+      </div>
+    </div>
+
+    <div class="feature">
+      <div class="icon">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#F6C65B" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="4" width="7" height="6" rx="1"/>
+          <rect x="15" y="4" width="7" height="6" rx="1"/>
+          <path d="M6 10v4h6v4M18 10v8h-6"/>
+        </svg>
+      </div>
+      <div>
+        <div class="label">Merge duplicates</div>
+        <div class="desc">move tasks, delete spare</div>
+      </div>
+    </div>
+
+    <div class="feature">
+      <div class="icon">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#E57373" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+          <path d="M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13"/>
+          <path d="M10 12v5M14 12v5"/>
+        </svg>
+      </div>
+      <div>
+        <div class="label">Delete empty / stale</div>
+        <div class="desc">90 / 180 / 365 days</div>
+      </div>
+    </div>
+
+    <div class="feature">
+      <div class="icon">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#3FB95A" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/>
+          <path d="M14 3v6h6"/>
+          <path d="M12 12v6M9 15l3 3 3-3"/>
+        </svg>
+      </div>
+      <div>
+        <div class="label">Local JSON backup</div>
+        <div class="desc">full plan snapshot</div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="footer">
+    <div class="url">github.com/griffin31-lab/Griffin31-ToolKit</div>
+    <div class="right">PowerShell 7 · Delegated Graph · No Telemetry</div>
+  </div>
+
+</div>
+</body>
+</html>
