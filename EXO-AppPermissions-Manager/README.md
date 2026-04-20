@@ -2,7 +2,7 @@
 
 > **Scope Exchange Online app permissions to specific mailboxes** — automated management scope + service principal + role assignment + verification.
 
-<sub>[← Back to Griffin31 ToolKit](../)</sub>
+<sub>[← Back to Griffin31 ToolKit](../) · Cross-platform (Windows · macOS · Linux) · PowerShell 7</sub>
 
 ---
 
