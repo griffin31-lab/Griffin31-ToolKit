@@ -1,0 +1,47 @@
+id: 7d46a290-3c51-4b87-9f2a-8c0e1b4d6a75
+name: Mailbox Forwarding Rule Created
+description: |
+  Detects creation of Exchange Online inbox forwarding rules, server-side forward
+  SMTP rules, or redirect rules. A classic post-compromise action in BEC cases —
+  attackers use forwarding to silently exfiltrate mail (especially financial
+  correspondence) while the user still has account access.
+severity: Medium
+requiredDataConnectors:
+  - connectorId: Office365
+    dataTypes:
+      - OfficeActivity
+queryFrequency: 1h
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - Collection
+  - Exfiltration
+relevantTechniques:
+  - T1114.003
+  - T1020
+query: |
+  OfficeActivity
+  | where TimeGenerated > ago(1h)
+  | where Operation in ("New-InboxRule", "Set-InboxRule", "New-TransportRule", "Set-TransportRule", "Set-Mailbox")
+  | extend Params = parse_json(Parameters)
+  | mv-expand Params
+  | extend ParamName = tostring(Params.Name), ParamValue = tostring(Params.Value)
+  | where ParamName in ("ForwardTo", "ForwardAsAttachmentTo", "RedirectTo", "ForwardingSmtpAddress", "DeliverToMailboxAndForward")
+  | where isnotempty(ParamValue)
+  | project TimeGenerated, UserId, ClientIP, Operation, ParamName, ParamValue, ResultStatus
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: UserId
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: ClientIP
+  - entityType: MailMessage
+    fieldMappings:
+      - identifier: Recipient
+        columnName: ParamValue
+version: 1.0.0
+kind: Scheduled

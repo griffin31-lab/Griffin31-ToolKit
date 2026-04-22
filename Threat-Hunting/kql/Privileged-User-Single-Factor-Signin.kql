@@ -1,0 +1,104 @@
+// Name: Privileged User Sign-In With Single-Factor Authentication
+// Description: Finds users who hold an Entra directory role (Global Admin, Security Admin,
+//              Exchange Admin, etc.) and completed a sign-in using only a password
+//              (singleFactorAuthentication). Any priv user sign-in that does not require
+//              MFA is a Conditional Access gap: the grant controls are not hitting that
+//              app for that user.
+// MITRE ATT&CK: T1078.004 (Valid Accounts: Cloud Accounts),
+//               T1556.006 (Modify Authentication Process: MFA)
+// Data Source: SigninLogs + IdentityInfo (Entra ID + Microsoft Sentinel UEBA)
+// Platform:    Microsoft Sentinel / Log Analytics  (requires UEBA IdentityInfo enrichment)
+// Time window: 30 days
+// Reference:   ./Privileged-User-Single-Factor-Signin.md
+// Context:     Post-incident reviews of 2023-2025 Entra tenant compromises repeatedly
+//              show that privileged accounts had CA policies *configured* but one app or
+//              client type slipped through the filter. This query surfaces the gap by
+//              listing priv users + the apps they signed into without MFA — a direct
+//              input to CA policy tightening.
+//
+// Recommended actions on hits:
+// - For each app in the output: extend the priv-user CA policy to cover it
+// - If the app is legacy or non-interactive: fix the gap via Workload Identity CA or app-specific policy
+// - For service accounts showing up: migrate to a managed identity or treat as workload identity
+// - Track number of priv users with any SFA sign-in over time — this is a hardening KPI
+//
+// ---------------------------------------------------------------------------
+// Extended context, background, tuning, and attribution
+// ---------------------------------------------------------------------------
+//
+// # Privileged User Sign-In With Single-Factor Authentication
+//
+// <sub>[← Back to KQL index](../README.md)</sub>
+//
+// ## Why this hunt
+//
+// Most organizations believe their privileged users are fully MFA-protected. Post-incident data from 2023–2025 breaches says otherwise: in tenant after tenant, investigators find Global Admins and other directory-role holders who completed at least some sign-ins using only a password, because:
+//
+// - A Conditional Access policy excluded a specific app (often an Azure management endpoint, Exchange PowerShell, or a legacy portal) and nobody noticed.
+// - A sign-in used a client type (`Other clients`, `Exchange Web Services`) the policy didn't cover.
+// - A service account that should not be a user got assigned a role.
+// - PIM activation happened with MFA once, but downstream sign-ins within the session didn't re-challenge because session tokens were honored.
+//
+// Any of these is a ready-made exploitation path. An attacker who gets the priv user's password (via infostealer, phishing, or credential-stuffing) can walk in through the uncovered app.
+//
+// This hunt surfaces exactly those gaps by joining **privileged users** (via the Sentinel UEBA `IdentityInfo` enrichment) to **single-factor-satisfied sign-ins**. Output is a prioritized CA-policy-hardening backlog.
+//
+// ## Expected output
+//
+// | Column | Meaning |
+// |---|---|
+// | `UserPrincipalName` | The privileged user with an SFA gap |
+// | `CountOfApplications` | How many distinct apps had SFA sign-ins |
+// | `ListOfApplications` | The apps to tighten CA on |
+//
+// ### Prioritization
+//
+// 1. Global Admins, Privileged Role Admins, and Security Admins with **any** entry → urgent.
+// 2. Exchange / SharePoint / Intune Admins → high.
+// 3. Reader-tier admins → medium; still close the gaps, lower urgency.
+//
+// For each app in the output, trace back through CA: why did the sign-in not hit an MFA grant control? Usually one of: app excluded, client-app condition misconfigured, policy scoped to a group that didn't include this user, policy in report-only mode.
+//
+// ## Tuning notes
+//
+// - **Requires UEBA:** `IdentityInfo` is populated by Microsoft Sentinel UEBA; without it you have to substitute a hand-maintained list of priv UPNs.
+// - **Baseline window:** 21-day UEBA window picks up recent role changes. Extend if your UEBA has longer retention.
+// - **Expected false positive:** legitimate service accounts with assigned roles that sign in non-interactively. Separate handling: migrate to managed identities or mark in an allow-list.
+// - **Don't rely on `AuthenticationRequirement` alone:** pair with `AuthenticationDetails` to confirm which method(s) satisfied — sometimes "Previously satisfied" claims make SFA look like MFA.
+//
+// ## Recommended hardening
+//
+// 1. **Privileged user CA baseline** — one policy, applies to all `Directory Roles`, grant = `Require MFA AND compliant device AND phishing-resistant auth strength`, applied to **all cloud apps** (no app exclusions).
+// 2. **Authentication Strengths** — require `Phishing-resistant MFA` (FIDO2 / Windows Hello / Authenticator with cert) for priv roles. No SMS, no voice.
+// 3. **Sign-in Frequency** of 4-8 hours for priv users on high-impact apps — reduces the value of a stolen session token.
+// 4. **Workload Identity CA** for any remaining service accounts that have roles — or better, migrate them to managed identities.
+// 5. **Break-glass exclusion** — only break-glass accounts should be excluded from this policy. See [Break-Glass-Account-Signin](./Break-Glass-Account-Signin.md) for the monitoring pair.
+// 6. **Monitor this query as a KPI** — track the count over time; goal is zero.
+//
+// ## References
+//
+// - [Entra Authentication Strengths](https://learn.microsoft.com/en-us/entra/identity/authentication/concept-authentication-strengths)
+// - [Conditional Access for admins](https://learn.microsoft.com/en-us/entra/identity/conditional-access/howto-conditional-access-policy-admin-mfa)
+// - [MITRE ATT&CK T1078.004 — Cloud Accounts](https://attack.mitre.org/techniques/T1078/004/)
+//
+// ## Source & attribution
+//
+// > Source: [reprise99/Sentinel-Queries — Azure Active Directory/Identity-SingleFactorSigninsFromPrivUsers.kql](https://github.com/reprise99/Sentinel-Queries/blob/main/Azure%20Active%20Directory/Identity-SingleFactorSigninsFromPrivUsers.kql) · MIT License
+
+let privusers =
+    IdentityInfo
+    | where TimeGenerated > ago(21d)
+    | summarize arg_max(TimeGenerated, *) by AccountUPN
+    | where isnotempty(AssignedRoles)
+    | where AssignedRoles != "[]"
+    | distinct AccountUPN;
+SigninLogs
+| where TimeGenerated > ago(30d)
+| where UserPrincipalName in~ (privusers)
+| where ResultType == 0
+| where AuthenticationRequirement == "singleFactorAuthentication"
+| summarize
+    ListOfApplications = make_set(AppDisplayName),
+    CountOfApplications = dcount(AppDisplayName)
+    by UserPrincipalName
+| sort by CountOfApplications desc

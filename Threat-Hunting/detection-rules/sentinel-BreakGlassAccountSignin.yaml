@@ -1,0 +1,42 @@
+id: 1d58b92f-7a34-4e61-b0c8-3f9e2d4a7c16
+name: Break-Glass / Emergency Account Sign-in
+description: |
+  Detects any sign-in (success or failure) from an emergency access / break-glass
+  account. These accounts exist solely to recover from a locked-out tenant
+  and should **never** be used in normal operations. Any activity on them is
+  either (a) a planned, change-controlled recovery, or (b) a compromise.
+  Requires the list of break-glass UPNs to be maintained in the
+  `BreakGlassAccounts` watchlist.
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - SigninLogs
+queryFrequency: 15m
+queryPeriod: 15m
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - InitialAccess
+  - Persistence
+  - PrivilegeEscalation
+relevantTechniques:
+  - T1078.004
+  - T1078.003
+query: |
+  let BreakGlassUsers = _GetWatchlist('BreakGlassAccounts') | project UserPrincipalName = tostring(UserPrincipalName);
+  SigninLogs
+  | where TimeGenerated > ago(15m)
+  | where UserPrincipalName in~ (BreakGlassUsers)
+  | project TimeGenerated, UserPrincipalName, IPAddress, Location, AppDisplayName, ResultType, ResultDescription, UserAgent, ClientAppUsed
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: UserPrincipalName
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: IPAddress
+version: 1.0.0
+kind: Scheduled

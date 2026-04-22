@@ -1,0 +1,123 @@
+// Name: Outbound Transfer to Free Cloud-Storage Services
+// Description: Surfaces outbound network connections from managed endpoints to the
+//              anonymous / free-tier file-sharing services that ransomware and
+//              infostealer operators overwhelmingly prefer as exfil destinations,
+//              plus use of the Rclone exfiltration client.
+// MITRE ATT&CK: T1567.002 (Exfiltration to Cloud Storage),
+//               T1567 (Exfiltration Over Web Service),
+//               T1048.003 (Exfiltration Over Unencrypted Non-C2 Protocol)
+// Data Source: DeviceNetworkEvents, DeviceProcessEvents (Microsoft Defender for Endpoint)
+// Platform:    Microsoft Defender XDR / Microsoft Sentinel
+// Time window: 7 days
+// Reference:   ./Cloud-Storage-Exfil.md
+// Context:     Post-compromise data theft overwhelmingly moves through services
+//              attackers can sign up for anonymously: mega.nz, anonfiles (now defunct),
+//              wetransfer, file.io, transfer.sh, gofile.io, bashupload, catbox.moe.
+//              Rclone is the leading exfil tooling — a Go CLI that speaks ~40 cloud
+//              storage APIs and ships Base64-encoded configs on the command line.
+//
+// Recommended actions on hits:
+// - Confirm no business justification for the destination host (many are rarely legitimate at work)
+// - Identify which files were transferred — pivot on DeviceName + Timestamp in DeviceFileEvents
+// - Isolate the device if Rclone or an anonymous uploader is confirmed
+// - Rotate credentials for the user account
+// - Check downstream: ransomware operators follow exfil with encryption within hours
+//
+// ---------------------------------------------------------------------------
+// Extended context, background, tuning, and attribution
+// ---------------------------------------------------------------------------
+//
+// # Outbound Transfer to Free Cloud-Storage Services
+//
+// <sub>[← Back to KQL index](../README.md)</sub>
+//
+// ## Why this hunt
+//
+// Modern intrusion rarely uses bespoke exfil infrastructure. Attackers use what is free, anonymous, and TLS-encrypted — services like **mega.nz**, **wetransfer**, **transfer.sh**, **gofile.io**, **file.io**, **bashupload**, **catbox.moe**. They account for a large share of real-world data theft in both ransomware double-extortion and espionage.
+//
+// The leading client-side tooling is **Rclone**, a Go CLI that speaks dozens of cloud storage APIs. Rclone is now the de facto standard for ransomware-gang exfil (Conti, LockBit, BlackCat / ALPHV playbooks all document it). Because Rclone uses native cloud APIs and HTTPS, network-only detection misses it — the hunt has to include process telemetry too.
+//
+// This query unions both signals: network events to known exfil hosts, and the Rclone process itself by version info, name, or distinctive argument patterns.
+//
+// ## Expected output
+//
+// Unified schema:
+//
+// | Column | Meaning |
+// |---|---|
+// | `Signal` | `CloudStorageConnect` (network hit) or `RcloneProcess` (process hit) |
+// | `RemoteUrl` / `InitiatingProcessCommandLine` | Full destination or the Rclone flags used |
+// | `InitiatingProcessFileName` | What tool made the connection |
+// | `InitiatingProcessAccountUpn` | The user context |
+//
+// In most corporate tenants, baseline traffic to these services is near-zero. Even a handful of hits from a single device in a short window warrants investigation.
+//
+// ## Tuning notes
+//
+// - **Legitimate use** does happen — marketing teams using WeTransfer for large file deliveries, developers using `transfer.sh` for one-off sharing. Maintain an explicit allow-list of known-business users if needed.
+// - To extend: add your tenant-specific suspicious destinations, or enrich with the Spamhaus / URLhaus feeds already mirrored in `Bert-JanP/Hunting-Queries-Detection-Rules`
+// - Add `dropbox.com` cautiously — it is heavily used legitimately, so scope its entry to unmanaged personal accounts via Defender for Cloud Apps policies rather than raw network detection
+// - For alerting, scope to `ago(1h)` and alert only on single-device spikes (e.g., > 50 MB transferred)
+//
+// ## Recommended hardening
+//
+// 1. **Microsoft Defender for Cloud Apps** — category policies that block or restrict "Cloud storage" app activity from managed endpoints. This is the single best preventive control for the class.
+// 2. **Web Content Filtering** in Defender for Endpoint — block the *Personal File Sharing* category tenant-wide
+// 3. **Conditional Access App Control** — apply session policies (block download, block upload) for sanctioned cloud-storage services
+// 4. **Block Rclone execution** via WDAC / AppLocker — it has no business being on corporate endpoints
+// 5. **DLP policies** — classify sensitive data with Purview sensitivity labels; Endpoint DLP will block copy to removable media and network-share upload
+// 6. **Egress filtering** at the network edge — deny DNS resolution for known exfil domains
+// 7. **Monitor large outbound transfers** from any one host (size anomaly detection) independent of destination
+//
+// ## Source & attribution
+//
+// Composed from two MIT-licensed sources:
+// - **cyb3rmik3/KQL-threat-hunting-queries** — `02.ThreatDetection/rclone-use-detection.md` (Rclone process detection using `ProcessVersionInfoProductName`)
+// - **Bert-JanP/Hunting-Queries-Detection-Rules** — general pattern for `DeviceNetworkEvents | where RemoteUrl has_any (domainList)` used across many queries in the repo
+//
+// Domain list enriched from public IR reporting on Conti, LockBit, and BlackCat exfil playbooks.
+//
+// ## References
+//
+// - [MITRE ATT&CK T1567.002 — Exfiltration to Cloud Storage](https://attack.mitre.org/techniques/T1567/002/)
+// - [NCC Group: Detecting Rclone — an effective tool for exfiltration](https://research.nccgroup.com/2021/05/27/detecting-rclone-an-effective-tool-for-exfiltration/)
+// - [Symantec: Ransomware data exfiltration](https://symantec-enterprise-blogs.security.com/blogs/threat-intelligence/ransomware-data-exfiltration)
+// - [Microsoft Defender for Cloud Apps — Overview](https://learn.microsoft.com/en-us/defender-cloud-apps/what-is-defender-for-cloud-apps)
+
+let ExfilDomains = dynamic([
+    "mega.nz", "mega.io", "mega.co.nz", "userstorage.mega.co.nz",
+    "wetransfer.com", "we.tl",
+    "anonfile.com", "anonfiles.com",
+    "transfer.sh",
+    "gofile.io",
+    "file.io",
+    "sendspace.com",
+    "bashupload.com",
+    "catbox.moe",
+    "filebin.net",
+    "dropmefiles.com",
+    "tempsend.com",
+    "privatebin.net"
+]);
+let NetworkHits =
+    DeviceNetworkEvents
+    | where Timestamp > ago(7d)
+    | where RemoteUrl has_any (ExfilDomains) or RemoteUrl has_any (ExfilDomains)
+    | project Timestamp, DeviceName, Signal = "CloudStorageConnect",
+              RemoteIP, RemoteUrl, RemotePort,
+              InitiatingProcessFileName, InitiatingProcessCommandLine, InitiatingProcessAccountUpn;
+// Rclone process indicator — frequently used for ransomware double-extortion exfil
+let RcloneHits =
+    DeviceProcessEvents
+    | where Timestamp > ago(7d)
+    | where ProcessVersionInfoProductName has "Rclone"
+         or FileName =~ "rclone.exe"
+         or ProcessCommandLine contains "rclone.conf"
+         or ProcessCommandLine has "--transfers"
+         or ProcessCommandLine has "--multi-thread-streams"
+    | project Timestamp, DeviceName, Signal = "RcloneProcess",
+              RemoteIP = "", RemoteUrl = FileName, RemotePort = int(null),
+              InitiatingProcessFileName, InitiatingProcessCommandLine = ProcessCommandLine,
+              InitiatingProcessAccountUpn = AccountUpn;
+union NetworkHits, RcloneHits
+| sort by Timestamp desc

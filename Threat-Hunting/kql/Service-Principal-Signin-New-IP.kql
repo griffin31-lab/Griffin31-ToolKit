@@ -1,0 +1,102 @@
+// Name: Service Principal Sign-In From New IP
+// Description: Flags successful service principal sign-ins from IP addresses never
+//              observed for that service principal in the prior 180 days. Baselines
+//              each SP individually — the first time a workload identity talks from
+//              a new network is often attacker-controlled.
+// MITRE ATT&CK: T1078.004 (Valid Accounts: Cloud Accounts),
+//               T1550.001 (Use Alternate Authentication Material: Application Access Token)
+// Data Source: AADServicePrincipalSignInLogs (Entra ID)
+// Platform:    Microsoft Sentinel / Log Analytics
+// Time window: 180-day baseline, 7-day detection window
+// Reference:   ./Service-Principal-Signin-New-IP.md
+// Context:     Service principals are designed to run from one or a small set of places —
+//              an Azure region, an on-prem datacenter, a SaaS backend. An attacker who
+//              steals an app secret typically uses it from their own infrastructure.
+//              "First time this SP signed in from this IP" is therefore a strong
+//              compromise signal, complementary to credential-theft detections.
+//
+// Recommended actions on hits:
+// - Compare the new IP against Azure datacenter ranges, your on-prem egress, and known
+//   SaaS IP ranges for the app vendor
+// - Pivot by AppId into AuditLogs for recent credential additions (App-Credential-Added hunt)
+// - If unexplained: rotate the app's credentials and revoke existing tokens
+// - Enable Workload Identity Conditional Access to pin the SP to known IPs/identities
+//
+// ---------------------------------------------------------------------------
+// Extended context, background, tuning, and attribution
+// ---------------------------------------------------------------------------
+//
+// # Service Principal Sign-In From New IP
+//
+// <sub>[← Back to KQL index](../README.md)</sub>
+//
+// ## Why this hunt
+//
+// Unlike human users who sign in from airports, home, and coffee shops, service principals are predictable:
+//
+// - An Azure-hosted app signs in from Azure datacenter ranges.
+// - An on-prem sync agent signs in from one egress IP.
+// - A SaaS vendor app signs in from that vendor's published ranges.
+//
+// The first time a service principal signs in from a brand-new IP — one never seen in 180 days of history for that specific SP — is almost always one of:
+//
+// 1. Attacker using a stolen app secret from their own infrastructure (malicious).
+// 2. Engineering team spun up a new deployment / changed a VNET (benign but worth verifying).
+// 3. SaaS vendor added new egress IPs (benign — usually announced).
+//
+// Adjacent cases #2 and #3 are easy to triage; the residue is case #1.
+//
+// This approach is important because CA policies do not (historically) target workload identities the same way they target users. The detection is where the coverage gap lives.
+//
+// ## Expected output
+//
+// | Column | Meaning |
+// |---|---|
+// | `ServicePrincipalName` | Which SP signed in |
+// | `AppId` | Its Entra App ID (pivot) |
+// | `IPAddress` | The new IP |
+//
+// ### Red flags
+//
+// - IP geolocates to a country that does not match the app's hosting model
+// - IP is a residential ISP, VPN, Tor exit, or cloud hosting you don't control
+// - Same AppId appears with multiple new IPs in the window (spray pattern)
+// - AuditLogs shows a recent credential addition on the same AppId (use with [First-Time-App-Credential-Addition](./First-Time-App-Credential-Addition.md))
+//
+// ## Tuning notes
+//
+// - **Volume:** this is a high-signal query but for big tenants with many workload identities it can still produce a list. Export the first pass, build an allow-list of `AppId + IP ranges`, and re-run for clean results.
+// - **Azure dynamic ranges:** Microsoft publishes Azure datacenter IPs; keep an allow-list of regions you run in so you don't alert on every Azure Function cold start.
+// - **For alerting:** shrink the detection window to 1h and schedule hourly.
+// - **Extend with user-agent:** adding `summarize make_set(UserAgent)` can help spot attacker tooling (custom strings, Python `requests` default UA).
+//
+// ## Recommended hardening
+//
+// 1. **Workload Identity Conditional Access** — restrict high-impact service principals to specific source IPs. This turns this hunt's detection into a prevention.
+// 2. **Managed identities** for intra-Azure workloads — they do not use portable secrets at all.
+// 3. **Short-lived certificates** for remaining app registrations; rotate monthly via Key Vault.
+// 4. **Monitor credential age** — a stale secret on a low-activity app is the attacker's first pick. Retire unused apps (`Identity-FindInactiveServicePrincipals.kql` in reprise99 is a good companion).
+//
+// ## References
+//
+// - [Azure datacenter IP ranges](https://www.microsoft.com/en-us/download/details.aspx?id=56519)
+// - [Entra Workload Identity Conditional Access](https://learn.microsoft.com/en-us/entra/identity/conditional-access/workload-identity)
+// - [MITRE ATT&CK T1078.004 — Cloud Accounts](https://attack.mitre.org/techniques/T1078/004/)
+// - [MITRE ATT&CK T1550.001 — Application Access Token](https://attack.mitre.org/techniques/T1550/001/)
+//
+// ## Source & attribution
+//
+// > Source: [reprise99/Sentinel-Queries — Azure Active Directory/Identity-ServicePrincipalSigninfromnewIP.kql](https://github.com/reprise99/Sentinel-Queries/blob/main/Azure%20Active%20Directory/Identity-ServicePrincipalSigninfromnewIP.kql) · MIT License
+
+AADServicePrincipalSignInLogs
+| where TimeGenerated > ago(180d) and TimeGenerated < ago(7d)
+| distinct AppId, IPAddress
+| join kind=rightanti
+    (
+    AADServicePrincipalSignInLogs
+    | where TimeGenerated > ago(7d)
+    | project TimeGenerated, AppId, IPAddress, ResultType, ServicePrincipalName
+    )
+    on IPAddress
+| where ResultType == "0"
+| distinct ServicePrincipalName, AppId, IPAddress

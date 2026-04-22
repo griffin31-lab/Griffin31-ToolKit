@@ -1,0 +1,123 @@
+// Name: Anomalous Access to Other Users' Mailboxes
+// Description: Detects users accessing multiple other users' mailboxes or accessing a
+//              large number of folders in another user's mailbox — a signal for
+//              unauthorized mailbox delegation abuse, compromised admin, or
+//              hands-on post-compromise reconnaissance.
+// MITRE ATT&CK: T1114.002 (Email Collection: Remote Email Collection),
+//               T1078.004 (Valid Accounts: Cloud Accounts)
+// Data Source: OfficeActivity (Exchange workload, MailItemsAccessed)
+// Platform:    Microsoft Sentinel / Log Analytics
+// Time window: variable (rightanti-join against historic baseline)
+// Reference:   ./Anomalous-Access-Other-Mailboxes.md
+// Context:     This was the primary M365 hunt used during the NOBELIUM / Solorigate
+//              investigation to surface attacker-driven mail enumeration across
+//              multiple mailboxes. It remains the canonical cross-mailbox detection.
+//
+// Recommended actions on hits:
+// - If UserId is an admin: confirm the business justification for the delegated access
+// - If UserId is a standard user: immediate compromise investigation
+// - Revoke mailbox delegation permissions via Remove-MailboxPermission
+// - Review Folders accessed for sensitive path names (Drafts, Deleted, Finance)
+// - Preserve MailItemsAccessed records before they roll off retention
+//
+// ---------------------------------------------------------------------------
+// Extended context, background, tuning, and attribution
+// ---------------------------------------------------------------------------
+//
+// # Anomalous Access to Other Users' Mailboxes
+//
+// <sub>[← Back to KQL index](../README.md)</sub>
+//
+// > Source: [Azure-Sentinel / Solutions/Microsoft 365/Hunting Queries/AnomolousUserAccessingOtherUsersMailbox.yaml](https://github.com/Azure/Azure-Sentinel/blob/master/Solutions/Microsoft%20365/Hunting%20Queries/AnomolousUserAccessingOtherUsersMailbox.yaml) · MIT License · Tagged Solorigate / NOBELIUM
+//
+// ## Why this hunt
+//
+// When an attacker gains foothold in M365 and holds (or impersonates) a privileged account, they routinely read other users' mailboxes — for reconnaissance, data theft, or lateral phishing. This query answers: *"Which users are reading mail in other users' mailboxes, and is that historically anomalous?"*
+//
+// It is the canonical cross-mailbox detection — Microsoft published it during the NOBELIUM / Solorigate response and it remains relevant against:
+//
+// - **Compromised admins** (Exchange / Global / Compliance) who now enumerate executive mailboxes
+// - **Delegated-permission abuse** — users with full mailbox access to another user enumerating beyond the normal workflow
+// - **Post-compromise reconnaissance** by an AiTM-replayed token
+//
+// The `rightanti` join exempts historically-normal cross-mailbox pairs (the user-pair has touched before), so the output is high-signal even in tenants with legitimate delegation.
+//
+// ## Expected output
+//
+// | Column | What it tells you |
+// |---|---|
+// | `UserId` | The user reading other mailboxes |
+// | `user_count` | How many distinct mailboxes they touched in the analysis window |
+// | `folder_count` | How many distinct folders (across those mailboxes) they enumerated |
+// | `set_MailboxOwnerUPN` | UPNs of every mailbox that was read |
+// | `set_folders` | Folder paths — scan for Inbox, Sent, Deleted, Archive |
+// | `set_ClientIP` | Source IPs — pivot for geo / VPN / AiTM indicators |
+// | `Reason` | Which threshold was crossed — user, folder, or both |
+//
+// High-signal hits:
+//
+// - Standard (non-admin) `UserId` with `user_count` > 1
+// - Admin `UserId` with `folder_count >> 5` and reading `Drafts`, `Sent Items`, `Deleted Items`
+// - `UserId` whose `set_ClientIP` contains an unusual geo compared to historic sign-ins
+//
+// Expected hits (reduce or allow-list):
+//
+// - Executive assistants with delegated access
+// - Shared-mailbox operators
+// - Compliance / e-discovery search accounts (track this separately)
+//
+// ## Tuning notes
+//
+// - **`user_threshold` and `folder_threshold`** — defaults are aggressive (1 and 5). Raise both for large-tenant baselines
+// - **Sentinel-hosted hunt time variables** — the `{{StartTimeISO}}` / `{{EndTimeISO}}` tokens are injected by Sentinel's hunt UI. For a scheduled analytic rule, replace with explicit `ago(1h)` / `now()`
+// - **Allow-list delegated workflows** — maintain a table of (UserId, MailboxOwnerUPN) pairs expected to touch each other, filter them out in a `leftanti` join
+// - **MailItemsAccessed cost** — this event can be very high volume on large tenants. Consider pre-aggregating to a summary table for long-window hunts
+// - **`Operation = MailItemsAccessed` prerequisite** — requires Purview Audit (Premium) or E5 / equivalent licensing. On E3 tenants this event is not recorded
+//
+// ## Recommended hardening
+//
+// 1. **Audit mailbox-permission grants** — quarterly review of `Get-MailboxPermission` and `Get-MailboxFolderPermission` for unexpected FullAccess / SendAs entries
+// 2. **Restrict Exchange admin scope via PIM** — just-in-time, 1-hour max, require approval for Organization Management
+// 3. **Alert on mailbox delegation** — build an analytic rule on `OfficeActivity` `Add-MailboxPermission` / `Add-MailboxFolderPermission` operations
+// 4. **Customer Lockbox** — for M365 E5, requires explicit customer approval for Microsoft support to touch mailboxes
+// 5. **Token protection (CA)** — mitigates the AiTM-replay path that enables much of this
+// 6. **Risk-based CA for high-privilege accounts** — require phishing-resistant MFA + compliant device for anyone with Exchange / Global Admin
+// 7. **Regular access reviews** — Entra ID Access Reviews on all mailbox-delegated groups
+//
+// ## References
+//
+// - [MITRE ATT&CK T1114.002 — Remote Email Collection](https://attack.mitre.org/techniques/T1114/002/)
+// - [Microsoft Threat Intelligence: NOBELIUM retrospective](https://www.microsoft.com/security/blog/2021/05/27/new-sophisticated-email-based-attack-from-nobelium/)
+// - [Microsoft Purview: MailItemsAccessed audit](https://learn.microsoft.com/purview/audit-mailboxes)
+
+let starttime = todatetime('{{StartTimeISO}}');
+let endtime = todatetime('{{EndTimeISO}}');
+let lookback = totimespan((endtime-starttime)*2);
+// Adjust this value to alter how many mailbox (other than their own) a user needs to access before being included in results
+let user_threshold = 1;
+// Adjust this value to alter how many mailbox folders in other's email accounts a user needs to access before being included in results
+let folder_threshold = 5;
+// Exclude historical as known good (set lookback and timeframe to same value to skip this)
+OfficeActivity
+| where TimeGenerated between(ago(lookback)..starttime)
+| where Operation =~ "MailItemsAccessed"
+| where ResultStatus =~ "Succeeded"
+| where tolower(MailboxOwnerUPN) != tolower(UserId)
+| join kind=rightanti(
+    OfficeActivity
+    | where TimeGenerated between(starttime..endtime)
+    | where Operation =~ "MailItemsAccessed"
+    | where ResultStatus =~ "Succeeded"
+    | where tolower(MailboxOwnerUPN) != tolower(UserId)
+  ) on MailboxOwnerUPN, UserId
+| where isnotempty(Folders)
+| mv-expand parse_json(Folders)
+| extend folders = tostring(Folders.Path)
+| extend ClientIP = iif(Client_IPAddress startswith "[", extract("\\[([^\\]]*)", 1, Client_IPAddress), Client_IPAddress)
+| summarize StartTime=max(TimeGenerated), EndTime=min(TimeGenerated), make_set(folders, 100000), make_set(ClientInfoString, 100000), make_set(ClientIP, 100000), make_set(MailboxGuid, 100000), make_set(MailboxOwnerUPN, 100000) by UserId
+| extend folder_count = array_length(set_folders)
+| extend user_count = array_length(set_MailboxGuid)
+| where user_count > user_threshold or folder_count > folder_threshold
+| extend Reason = case(user_count > user_threshold and folder_count > folder_threshold, "Both User and Folder Threshold Exceeded", folder_count > folder_threshold and user_count < user_threshold, "Folder Count Threshold Exceeded","User Threshold Exceeded")
+| sort by user_count desc
+| extend AccountName = tostring(split(UserId, "@")[0]), AccountUPNSuffix = tostring(split(UserId, "@")[1])

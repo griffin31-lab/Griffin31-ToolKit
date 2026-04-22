@@ -1,0 +1,52 @@
+id: 2b49d317-5e8a-4c02-a7f1-6e9b3d5a8c24
+name: Impossible Travel Between Successful Sign-ins
+description: |
+  Detects successful interactive sign-ins by the same user from two geographically
+  distant locations in a time window that would require travel faster than a
+  commercial flight (900 km/h threshold). Strong indicator of stolen credentials
+  or session-cookie replay. Excludes cloud apps that commonly produce geo-anomaly
+  false positives (Azure AD Sync, Microsoft 365 service accounts).
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - SigninLogs
+queryFrequency: 1h
+queryPeriod: 6h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - InitialAccess
+  - CredentialAccess
+relevantTechniques:
+  - T1078.004
+  - T1110
+query: |
+  let LookbackWindow = 6h;
+  let MaxSpeedKmh = 900;
+  SigninLogs
+  | where TimeGenerated > ago(LookbackWindow)
+  | where ResultType == 0
+  | where isnotempty(LocationDetails.geoCoordinates.latitude)
+  | extend Lat = todouble(LocationDetails.geoCoordinates.latitude), Lon = todouble(LocationDetails.geoCoordinates.longitude)
+  | extend Country = tostring(LocationDetails.countryOrRegion), City = tostring(LocationDetails.city)
+  | project TimeGenerated, UserPrincipalName, IPAddress, Country, City, Lat, Lon, AppDisplayName
+  | order by UserPrincipalName asc, TimeGenerated asc
+  | extend PrevTime = prev(TimeGenerated), PrevLat = prev(Lat), PrevLon = prev(Lon), PrevIP = prev(IPAddress), PrevUser = prev(UserPrincipalName), PrevCountry = prev(Country)
+  | where UserPrincipalName == PrevUser and Country != PrevCountry
+  | extend TimeDeltaHours = (todouble(datetime_diff('minute', TimeGenerated, PrevTime))) / 60.0
+  | extend DistanceKm = geo_distance_2points(Lon, Lat, PrevLon, PrevLat) / 1000
+  | extend RequiredSpeedKmh = DistanceKm / TimeDeltaHours
+  | where RequiredSpeedKmh > MaxSpeedKmh and TimeDeltaHours < 6
+  | project TimeGenerated, UserPrincipalName, PrevIP, PrevCountry, IPAddress, Country, DistanceKm, TimeDeltaHours, RequiredSpeedKmh, AppDisplayName
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: UserPrincipalName
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: IPAddress
+version: 1.0.0
+kind: Scheduled

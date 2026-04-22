@@ -1,0 +1,134 @@
+// Name: Microsoft Graph API Access from Unusual User-Agent
+// Description: Surfaces Graph API requests made by user-agent strings that do not
+//              match the common Microsoft first-party clients or the approved
+//              third-party apps. Catches bespoke exfil / collection tooling
+//              (AzureHound, GraphRunner, ROADtools, custom scripts) accessing
+//              Graph with stolen tokens.
+// MITRE ATT&CK: T1078.004 (Valid Accounts: Cloud Accounts),
+//               T1087.004 (Account Discovery: Cloud Account),
+//               T1550.001 (Use Alternate Authentication Material: Application Access Token)
+// Data Source: MicrosoftGraphActivityLogs (Sentinel table: GraphAPIAuditEvents
+//              depending on connector naming)
+// Platform:    Microsoft Sentinel
+// Time window: 7 days
+// Reference:   ./Unusual-GraphAPI-UserAgent.md
+// Context:     After token theft, attackers reach for Microsoft Graph via the
+//              stolen token. The clients they use (ROADtools, GraphRunner,
+//              AzureHound, custom python-requests scripts) leave distinctive
+//              user-agent fingerprints that are effectively absent in clean tenants.
+//
+// Recommended actions on hits:
+// - Identify the AccountObjectId / AppId making the calls
+// - Review what Graph resources were touched and whether sensitive data was read
+// - Revoke refresh tokens and force reauthentication for the affected principal
+// - Correlate with SigninLogs for the originating IP and device
+// - Add the user-agent to a custom detection for future automatic alerting
+//
+// ---------------------------------------------------------------------------
+// Extended context, background, tuning, and attribution
+// ---------------------------------------------------------------------------
+//
+// # Microsoft Graph API Access from Unusual User-Agent
+//
+// <sub>[← Back to KQL index](../README.md)</sub>
+//
+// ## Why this hunt
+//
+// The `MicrosoftGraphActivityLogs` table (enabled via Entra Diagnostic Settings) records every Graph API request made against the tenant, including the calling user-agent. Legitimate Graph traffic comes overwhelmingly from Microsoft first-party clients (Outlook, Teams, Office, OneDrive), major browsers, and a small set of approved third-party apps.
+//
+// Attackers operating with a stolen token are almost never running one of those. They reach for the tooling they know:
+// - **AzureHound** — Go-based, identifies as a Go HTTP client
+// - **ROADtools / roadrecon** — Python, identifies as `python-requests`
+// - **GraphRunner** — PowerShell, appears as `PowerShell/7...`
+// - **GraphSpy**, **TokenSmith**, custom exfil scripts — `python-requests`, `node-fetch`, `curl`, `okhttp`
+// - **Postman** during manual exploration by a live attacker
+//
+// This hunt flags any Graph request whose user-agent falls outside the known-good set — a high-signal filter since clean tenants virtually never see these.
+//
+// ## Expected output
+//
+// | Column | Meaning |
+// |---|---|
+// | `UserAgent` | The full user-agent string — investigate any that look like a raw HTTP library |
+// | `UserId` | Entra object ID of the calling principal |
+// | `AppId` | The app context. `00000003-0000-0000-c000-000000000000` is Microsoft Graph (first-party) — a stolen delegated-permission token uses this. Other values point to a rogue / over-permissioned registered app. |
+// | `RequestCount`, `UniqueResources` | Scale of the activity in a 1h bin |
+// | `SampleUri` | What was being read — `/users`, `/groups`, `/me/messages`, `/drive/root/children` patterns are classic collection |
+// | `Methods` | GET-heavy is reconnaissance; POST/PATCH/DELETE is active tampering |
+//
+// ## Tuning notes
+//
+// - **Some legitimate automation will appear here** — CI/CD pipelines, custom-built admin tooling, monitoring agents that call Graph. Identify these and add their user-agents (or App IDs, more precise) to `KnownGoodUserAgents` as a tenant-specific allow-list.
+// - `MicrosoftGraphActivityLogs` requires **Entra ID P1+** and must be explicitly routed to Log Analytics via Diagnostic Settings. Older deployments may know the table as `GraphAPIAuditEvents` — adjust accordingly.
+// - For high-value alerting, filter results to those where `UniqueResources >= 4` and `Methods` includes GET against enumeration-heavy paths (`/users`, `/groups`, `/applications`, `/serviceprincipals`, `/directoryRoles`)
+// - The partner query `kql/endpoint/BloodHound-SharpHound-Collector.kql` covers AzureHound detection from the **endpoint** side — run both if AzureHound is a concern
+//
+// ## Recommended hardening
+//
+// 1. **Token Protection (Conditional Access)** — binds tokens to the originating device, so even a leaked token is useless on a Python script from a different host
+// 2. **Workload Identity Federation + Managed Identities** — replace static app secrets / certificates where possible; leaked creds cause a large share of stolen-token incidents
+// 3. **Continuous Access Evaluation (CAE)** — near-real-time token revocation when risk is detected
+// 4. **Restrict which users can register applications** — reduces the attack surface of the rogue-app path
+// 5. **App Governance in Defender for Cloud Apps** — detects OAuth apps with anomalous Graph API behavior specifically (volume, endpoint diversity, unusual user-agents)
+// 6. **Enable MicrosoftGraphActivityLogs tenant-wide** and set a rolling retention of ≥ 90 days — without these logs you have effectively no Graph-side visibility
+// 7. **Rotate app credentials** (certificates, client secrets) on a schedule, ideally via automation
+//
+// ## Source & attribution
+//
+// Query composed from two MIT-licensed sources:
+// - **Bert-JanP/Hunting-Queries-Detection-Rules** — `Graph API/AzureHound.md` (AzureHound fingerprint, GET recon pattern)
+// - **Bert-JanP/Hunting-Queries-Detection-Rules** — `Graph API/GraphAPIAuditEvents - GraphURIAPIRequestStats.md` (aggregation pattern over `GraphAPIAuditEvents`)
+//
+// User-agent list enriched from public documentation and research on ROADtools, GraphRunner, GraphSpy, and related offensive toolkits.
+//
+// ## References
+//
+// - [MITRE ATT&CK T1550.001 — Application Access Token](https://attack.mitre.org/techniques/T1550/001/)
+// - [MITRE ATT&CK T1087.004 — Cloud Account Discovery](https://attack.mitre.org/techniques/T1087/004/)
+// - [Microsoft Learn: Microsoft Graph activity logs](https://learn.microsoft.com/en-us/graph/microsoft-graph-activity-logs-overview)
+// - [Microsoft Learn: Token Protection in Conditional Access](https://learn.microsoft.com/en-us/entra/identity/conditional-access/concept-token-protection)
+// - [CloudBrothers: Detect threats with Microsoft Graph logs](https://www.cloudbrothers.info/detect-threats-microsoft-graph-logs-part-1/)
+
+let SuspiciousUserAgents = dynamic([
+    "python-requests",
+    "python/",
+    "Go-http-client",
+    "Go http-client",
+    "node-fetch",
+    "okhttp",
+    "curl/",
+    "Wget/",
+    "PostmanRuntime",
+    "azurehound",
+    "roadtools",
+    "graphrunner",
+    "powershell",
+    "axios",
+    "httpx"
+]);
+let KnownGoodUserAgents = dynamic([
+    "Microsoft Graph",
+    "Microsoft Office",
+    "OfficeClickToRun",
+    "MsGraphCli",
+    "Mozilla",
+    "Edge",
+    "Chrome",
+    "Safari",
+    "OneDrive",
+    "Outlook",
+    "Teams"
+]);
+MicrosoftGraphActivityLogs
+| where TimeGenerated > ago(7d)
+| where isnotempty(UserAgent)
+| extend UserAgentLower = tolower(UserAgent)
+| where UserAgentLower has_any (SuspiciousUserAgents)
+      or not(UserAgent has_any (KnownGoodUserAgents))
+| summarize RequestCount = count(),
+            UniqueResources = dcount(RequestUri),
+            SampleUri = take_any(RequestUri),
+            Methods = make_set(RequestMethod, 10)
+          by UserAgent, tostring(UserId), tostring(AppId), bin(TimeGenerated, 1h)
+| where RequestCount > 5
+| sort by RequestCount desc

@@ -1,0 +1,92 @@
+// Name: SharePoint / OneDrive Bulk Download by a Single User
+// Description: Flags single-user SharePoint or OneDrive file transfer activity that
+//              exceeds a volume threshold (default 5,000 events) inside a 15-minute
+//              window. Classic staging / exfiltration signal on M365.
+// MITRE ATT&CK: T1020 (Automated Exfiltration),
+//               T1530 (Data from Cloud Storage),
+//               T1213.002 (Data from Information Repositories: SharePoint)
+// Data Source: OfficeActivity (SharePoint workload)
+// Platform:    Microsoft Sentinel / Log Analytics
+// Time window: 15-minute rolling bins (tune threshold to your baseline)
+// Reference:   ./SharePoint-Bulk-Download.md
+// Context:     A compromised or insider account pulling thousands of files from
+//              SharePoint / OneDrive in a short window is one of the highest-signal
+//              M365 exfiltration indicators. Threshold-based detection complements
+//              UEBA / anomaly-based logic.
+//
+// Recommended actions on hits:
+// - Review UserId, ClientIP, and fileslist — does the volume match a legitimate task?
+// - Cross-reference SigninLogs for the same UserId / IP (unusual geo, new device)
+// - Check whether the user was recently targeted by phishing or has a risky sign-in
+// - If malicious: disable the account, revoke sessions, preserve the file list for DFIR
+// - Consider an Insider Risk Management policy or DLP match on the same files
+//
+// ---------------------------------------------------------------------------
+// Extended context, background, tuning, and attribution
+// ---------------------------------------------------------------------------
+//
+// # SharePoint / OneDrive Bulk Download by a Single User
+//
+// <sub>[← Back to KQL index](../README.md)</sub>
+//
+// > Source: [Azure-Sentinel / Solutions/Microsoft 365/Analytic Rules/sharepoint_file_transfer_above_threshold.yaml](https://github.com/Azure/Azure-Sentinel/blob/master/Solutions/Microsoft%20365/Analytic%20Rules/sharepoint_file_transfer_above_threshold.yaml) · MIT License
+//
+// ## Why this hunt
+//
+// A single user touching thousands of distinct files in SharePoint or OneDrive inside a 15-minute window is almost never normal business activity. It is one of the most reliable exfiltration signals in Microsoft 365 because:
+//
+// - `SharePointFileOperation` records every document-level read/download/upload
+// - `OfficeObjectId` uniquely identifies each file — `dcount` captures scope, not click-storms
+// - A 15-minute bin smooths user-noise without losing the signal of a dump
+//
+// Typical real-world scenarios that trigger this hunt:
+//
+// - **Compromised account exfiltration** — attacker with stolen credentials downloads the entire OneDrive / a SharePoint site library
+// - **Insider leaving the company** — employee bulk-syncs work files before departure
+// - **Ransomware pre-staging** — some ransomware groups (Clop, BlackCat, Akira) exfiltrate before encryption
+// - **Legitimate migration** — M&A integration, tenant-to-tenant moves, or device refresh (these should be allow-listed)
+//
+// ## Expected output
+//
+// | Column | What it tells you |
+// |---|---|
+// | `TimeGenerated` (bin) | 15-minute window the threshold was crossed |
+// | `UserId` | UPN of the user doing the transfer |
+// | `ClientIP` | Source IP — pivot for geo / known-bad check |
+// | `count_distinct_OfficeObjectId` | How many distinct files were touched |
+// | `fileslist` | Full array of object IDs (may truncate at 10,000) |
+// | `AccountName` / `AccountUPNSuffix` | Entity-mapping fields for Sentinel |
+//
+// A normal tenant returns **zero or very few** rows per day. Any hit is worth a triage pass.
+//
+// ## Tuning notes
+//
+// - **Threshold** — 5,000 is the upstream default. For smaller tenants you may want 1,000; for large tenants with active migrations, raise to 10,000+ or scope by site
+// - **Known-good list** — exempt service accounts performing backups / migration (e.g., ShareGate, AvePoint)
+// - **Sync vs. interactive** — `FileSyncDownloadedFull` fires when a user adds a SharePoint library to OneDrive sync; that first sync can legitimately pull thousands of files. Consider splitting the query to separate sync from interactive downloads
+// - **Time window** — tighten to 5m for near-real-time alerting, or widen to 1h for slow-and-low exfiltration
+// - **Pair with UEBA** — cross-reference the `UserId` with `BehaviorAnalytics` for an anomaly score boost
+//
+// ## Recommended hardening
+//
+// 1. **Enable Defender for Cloud Apps (MDA) / Insider Risk Management** — has native "mass download" policies with user baselines, better than thresholds alone
+// 2. **Restrict download from unmanaged devices** — Conditional Access app control + session policies for SharePoint / OneDrive (browser-only mode, block download)
+// 3. **Sensitivity labels + DLP** — labels with download restrictions scope the blast radius to non-sensitive files
+// 4. **External sharing settings** — if this triggers on files being pulled for forwarding externally, tighten site-level sharing defaults
+// 5. **Session timeouts** — shorter token lifetime on unmanaged sessions means stolen tokens have a smaller window to exfiltrate
+//
+// ## References
+//
+// - [MITRE ATT&CK T1020 — Automated Exfiltration](https://attack.mitre.org/techniques/T1020/)
+// - [MITRE ATT&CK T1530 — Data from Cloud Storage](https://attack.mitre.org/techniques/T1530/)
+// - [MITRE ATT&CK T1213.002 — SharePoint](https://attack.mitre.org/techniques/T1213/002/)
+// - [Microsoft Learn: Control SharePoint and OneDrive access from unmanaged devices](https://learn.microsoft.com/sharepoint/control-access-from-unmanaged-devices)
+// - [Microsoft Purview Insider Risk Management](https://learn.microsoft.com/purview/insider-risk-management)
+
+let threshold = 5000;
+OfficeActivity
+| where EventSource == "SharePoint" and OfficeWorkload has_any("SharePoint", "OneDrive") and Operation has_any ("FileDownloaded", "FileSyncDownloadedFull", "FileSyncUploadedFull", "FileUploaded")
+| summarize count_distinct_OfficeObjectId=dcount(OfficeObjectId), fileslist=make_set(OfficeObjectId, 10000) by UserId, ClientIP, bin(TimeGenerated, 15m)
+| where count_distinct_OfficeObjectId >= threshold
+| extend FileSample = iff(array_length(fileslist) == 1, tostring(fileslist[0]), strcat("SeeFilesListField","_", tostring(hash(tostring(fileslist)))))
+| extend AccountName = tostring(split(UserId, "@")[0]), AccountUPNSuffix = tostring(split(UserId, "@")[1])

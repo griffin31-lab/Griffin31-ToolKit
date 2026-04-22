@@ -1,0 +1,99 @@
+// Name: Custom Security Attribute Set on a User
+// Description: Detects 'Update attribute values assigned to a user' events for Entra
+//              custom security attributes. Attributes are used to drive Conditional
+//              Access, app role assignments, and Defender policies — modifying them
+//              changes who can access what, silently.
+// MITRE ATT&CK: T1098    (Account Manipulation),
+//               T1556    (Modify Authentication Process)
+// Data Source: AuditLogs (Entra ID directory audit)
+// Platform:    Microsoft Sentinel / Log Analytics
+// Time window: default workspace range
+// Reference:   ./Custom-Security-Attribute-Set.md
+// Context:     Custom security attributes are increasingly used in Entra for
+//              filtering CA policies and ABAC. An attacker who can change a target's
+//              attribute value effectively changes which CA policies apply — a
+//              subtle, audit-evading privilege escalation.
+//
+// Recommended actions on hits:
+// - Verify the Actor is an authorized attribute definition / assignment admin
+// - Check whether the attribute is used by any Conditional Access filter
+// - If unauthorized, restore the previous value and investigate the Actor
+//
+// ---------------------------------------------------------------------------
+// Extended context, background, tuning, and attribution
+// ---------------------------------------------------------------------------
+//
+// # Custom Security Attribute Set on a User
+//
+// <sub>[← Back to KQL index](../README.md)</sub>
+//
+// > Source: [reprise99 / Sentinel-Queries — Audit-CustomSecurityAttributeSet.kql](https://github.com/reprise99/Sentinel-Queries/blob/main/Azure%20Active%20Directory/Audit-CustomSecurityAttributeSet.kql) · MIT License
+//
+// ## Why this hunt
+//
+// Custom Security Attributes (CSAs) were introduced in Entra ID to enable **attribute-based access control (ABAC)**. A growing number of organisations use them as:
+//
+// - Filters for **Conditional Access policies** (e.g., apply policy only to users with `Department=Finance`)
+// - **Role assignment conditions** — scope a role by attribute value
+// - **Defender policy scoping** — focus DLP or Insider Risk on tagged cohorts
+// - **Application access** — apps that read attributes via Graph to make authorization decisions
+//
+// Because CSAs are increasingly load-bearing for access decisions, they are **an attractive, low-noise persistence target**:
+//
+// - Changing a target user's `Clearance=Secret` to `Clearance=TopSecret` may silently bring them into scope of resources they shouldn't see
+// - Removing a user from `RestrictedGroup=True` may exempt them from a CA policy that was blocking their access
+// - An attacker who has the **Attribute Definition Administrator** role can do this without being a Global Admin — lower-privilege pivot
+//
+// Most organisations have **no detective control** on CSA changes today. This hunt closes that gap.
+//
+// ## Expected output
+//
+// | Column | What it tells you |
+// |---|---|
+// | `TimeGenerated` | When the attribute was changed |
+// | `Target` | UPN of the user whose attribute was modified |
+// | `Attribute Set Name` | Which CSA set (e.g., `Engineering`, `Compliance`) |
+// | `Attribute Name` | Which attribute within the set (e.g., `Clearance`) |
+// | `Attribute Value` | New value |
+// | `Actor` | UPN of the modifier |
+//
+// This is an awareness hunt — most tenants will see zero or very few rows. If the tenant uses CSAs heavily, baseline the normal actors and alert on off-baseline changes.
+//
+// ## Tuning notes
+//
+// - **Low-volume, high-signal** — output is typically small; review every row during initial rollout, then baseline
+// - **No explicit time window** — relies on workspace retention. For a scheduled rule, set `queryFrequency: 1d` and `queryPeriod: 1d`
+// - **Attribute-level allow-list** — if a specific attribute is known to change frequently (e.g., `LastTrainingDate`), exclude it in `| where ['Attribute Name'] !in (...)`
+// - **Enrich with CA policy usage** — if the attribute changed is used by a CA policy filter, escalate severity
+// - **Pair with sign-in correlation** — join the Target's `SigninLogs` for 24h after the change; look for access to newly-unlocked resources
+//
+// ## Recommended hardening
+//
+// 1. **Restrict Attribute Definition Administrator assignments** — PIM + approval + MFA. Treat as Tier-1 privilege
+// 2. **Use attribute sets as authorization boundaries** — each attribute set should have distinct owners and reviewers
+// 3. **Attribute change review workflow** — require a ticket / change-management entry for every attribute change; reconcile against this hunt's output weekly
+// 4. **Monitor CA policy filter expressions** — quarterly review of which CA policies reference custom attributes, which values filter to what scope
+// 5. **Avoid load-bearing sensitive decisions on mutable attributes** — for top-critical decisions, use group membership + access reviews, which are harder to modify silently
+//
+// ## References
+//
+// - [MITRE ATT&CK T1098 — Account Manipulation](https://attack.mitre.org/techniques/T1098/)
+// - [Microsoft Learn: Custom security attributes overview](https://learn.microsoft.com/entra/fundamentals/custom-security-attributes-overview)
+// - [Microsoft Learn: ABAC conditions in Entra role assignments](https://learn.microsoft.com/entra/identity/role-based-access-control/conditions-overview)
+
+AuditLogs
+| where OperationName == "Update attribute values assigned to a user"
+| extend x = tostring(parse_json(tostring(TargetResources[0].modifiedProperties))[0].displayName)
+| extend ["Attribute Value"] = tostring(parse_json(tostring(parse_json(tostring(TargetResources[0].modifiedProperties))[0].newValue))[0])
+| extend Target = tostring(TargetResources[0].userPrincipalName)
+| extend Actor = tostring(parse_json(tostring(InitiatedBy.user)).userPrincipalName)
+| parse x with * '.' ['Attribute Set Name'] "_" *
+| extend ["Attribute Name"]=split(x, "_")[1]
+| project
+    TimeGenerated,
+    OperationName,
+    Target,
+    ['Attribute Set Name'],
+    ['Attribute Name'],
+    ['Attribute Value'],
+    Actor

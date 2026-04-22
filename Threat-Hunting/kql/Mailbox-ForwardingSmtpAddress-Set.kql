@@ -1,0 +1,118 @@
+// Name: Mailbox ForwardingSmtpAddress Set (Set-Mailbox / EWS / Graph)
+// Description: Surfaces every Set-Mailbox with ForwardingSmtpAddress / ForwardingAddress
+//              and every inbox rule with ForwardTo / RedirectTo, flagging external
+//              destination domains. Parses the Parameters bag and extracts the
+//              forwarding target, with internal-vs-external classification.
+// MITRE ATT&CK: T1114.003 (Email Collection: Email Forwarding Rule),
+//               T1020    (Automated Exfiltration)
+// Data Source: OfficeActivity (Exchange workload)
+// Platform:    Microsoft Sentinel / Log Analytics
+// Time window: default workspace lookback (set in the query bar)
+// Reference:   ./Mailbox-ForwardingSmtpAddress-Set.md
+// Context:     Set-Mailbox -ForwardingSmtpAddress is the PowerShell / EWS / Graph
+//              equivalent of an inbox forwarding rule. Attackers who obtain a mailbox
+//              session token or admin creds often use this path because it leaves
+//              less footprint in the owner's Outlook UI than an inbox rule.
+//
+// Recommended actions on hits:
+// - Verify the Actor is authorized to modify mailboxes (helpdesk, MEO admin)
+// - Check if the ForwardedtoDomain is an org-owned domain or truly external
+// - Clear the forwarding via Set-Mailbox -ForwardingSmtpAddress $null if unauthorized
+// - Review mailbox activity for the 30 days before and after the change
+// - If an admin account did this, investigate whether that admin account is compromised
+//
+// ---------------------------------------------------------------------------
+// Extended context, background, tuning, and attribution
+// ---------------------------------------------------------------------------
+//
+// # Mailbox ForwardingSmtpAddress Set
+//
+// <sub>[← Back to KQL index](../README.md)</sub>
+//
+// > Source: [Azure-Sentinel / Solutions/Microsoft 365/Hunting Queries/OfficeMailForwarding_hunting.yaml](https://github.com/Azure/Azure-Sentinel/blob/master/Solutions/Microsoft%20365/Hunting%20Queries/OfficeMailForwarding_hunting.yaml) · MIT License
+//
+// ## Why this hunt
+//
+// Where an inbox rule is the end-user-visible way to auto-forward, `Set-Mailbox -ForwardingSmtpAddress` is the **admin-side** equivalent. It is accessible via:
+//
+// - PowerShell (`Set-Mailbox`, Exchange Online Management module)
+// - EWS (Exchange Web Services managed API)
+// - Microsoft Graph `mailboxSettings.forwarding`
+// - Remote PowerShell session (Basic auth historically, OAuth today)
+//
+// Attackers prefer this path when they hold admin credentials because:
+//
+// - The rule is **not visible in the user's Outlook rules UI**
+// - It persists across session terminations
+// - It can be applied to many mailboxes at once via a single PowerShell loop
+// - It can coexist with a separate inbox rule for defense-in-depth persistence
+//
+// This query is the unified parser for all three forwarding primitives: `Set-Mailbox -ForwardingSmtpAddress`, `New-InboxRule -ForwardTo`, and `New-InboxRule -RedirectTo`. It automatically classifies each as **internal** or **external-domain** forwarding based on the UserId's own domain.
+//
+// ## Expected output
+//
+// | Column | What it tells you |
+// |---|---|
+// | `TimeGenerated` | When the forwarding was configured |
+// | `UserId` | The mailbox owner whose mail is being forwarded |
+// | `UserDomain` | The owner's primary domain |
+// | `Operation` | Which primitive was used (`Set-Mailbox`, `New-InboxRule`, `Set-InboxRule`) |
+// | `ForwardedtoDomain` | Destination domain |
+// | `fwdingDestination` | Full SMTP address of the destination |
+// | `ClientIPAddress` | Source IP that performed the change |
+// | `Result` | Pre-computed classification: "External Domain" vs "Internal domain" |
+//
+// High-signal hits:
+//
+// - `Result = "External Domain"` to a consumer-webmail domain (gmail, outlook.com, proton, tutanota)
+// - External domain that is a **lookalike** of your own (e.g., `c0mpany.com` vs `company.com`)
+// - Bulk pattern: many mailboxes forwarded to the same destination within minutes (pair with the `MultipleUsersEmailForwardedToSameDestination` query)
+//
+// Expected / benign hits:
+//
+// - User forwarding to a secondary org domain during M&A
+// - Shared mailbox forwarding to a distribution list
+// - Legitimate third-party email archiving / e-discovery tool
+//
+// ## Tuning notes
+//
+// - **Add a known-good forwarding destinations table** — join against a watchlist / external table to suppress expected forwarders
+// - **Time window** — no explicit `ago()` filter; the query relies on workspace / rule period. For scheduled analytic rule, set `queryFrequency: 1h`
+// - **Clarify internal vs external** — the current `subDomain` comparison works for simple single-domain tenants. For multi-domain tenants, maintain a watchlist of accepted domains and filter out any `ForwardedtoDomain` that appears in it
+// - **Correlate with SigninLogs** — pivot `UserId` and `ClientIPAddress` against sign-in logs for the preceding 48 hours to check for AiTM / token replay
+//
+// ## Recommended hardening
+//
+// 1. **Disable external auto-forwarding tenant-wide** — Outbound Spam Policy > Automatic forwarding = Off. Exchange honours this at the transport layer; it blocks the `Set-Mailbox` + inbox rule path simultaneously
+// 2. **Role-based access review for Exchange admins** — `Mailbox Settings` permission should be scoped and audited
+// 3. **Audit log protection** — ensure `UnifiedAuditLogIngestionEnabled` is true and `Set-AdminAuditLogConfig` changes alert (see the "Exchange Audit Log Disabled" hunt)
+// 4. **Conditional Access on EOP / Exchange Online PowerShell** — require MFA + compliant device for admin access
+// 5. **Privileged Identity Management** — time-bound the Exchange Administrator role; no permanent assignments
+// 6. **Token protection** — CA feature that binds refresh tokens to the originating device
+//
+// ## References
+//
+// - [MITRE ATT&CK T1114.003](https://attack.mitre.org/techniques/T1114/003/)
+// - [Microsoft Learn: External email forwarding controls](https://learn.microsoft.com/defender-office-365/outbound-spam-policies-external-email-forwarding)
+// - [Microsoft Learn: Set-Mailbox reference](https://learn.microsoft.com/powershell/module/exchange/set-mailbox)
+
+OfficeActivity
+| where OfficeWorkload == "Exchange"
+| where (Operation =~ "Set-Mailbox" and Parameters contains 'ForwardingSmtpAddress')
+    or (Operation in~ ('New-InboxRule','Set-InboxRule') and (Parameters contains 'ForwardTo' or Parameters contains 'RedirectTo'))
+| extend parsed = parse_json(Parameters)
+| extend fwdingDestination_initial = (iif(Operation =~ "Set-Mailbox", tostring(parsed[1].Value), tostring(parsed[2].Value)))
+| where isnotempty(fwdingDestination_initial)
+| extend fwdingDestination = iff(fwdingDestination_initial has "smtp", (split(fwdingDestination_initial,":")[1]), fwdingDestination_initial )
+| parse fwdingDestination with * '@' ForwardedtoDomain
+| parse UserId with *'@' UserDomain
+| extend subDomain = ((split(strcat(tostring(split(UserDomain, '.')[-2]),'.',tostring(split(UserDomain, '.')[-1])), '.') [0]))
+| where ForwardedtoDomain !contains subDomain
+| extend Result = iff( ForwardedtoDomain != UserDomain ,"Mailbox rule created to forward to External Domain", "Forward rule for Internal domain")
+| extend ClientIPAddress = case( ClientIP has ".", tostring(split(ClientIP,":")[0]), ClientIP has "[", tostring(trim_start(@'[[]',tostring(split(ClientIP,"]")[0]))), ClientIP )
+| extend Port = case(
+    ClientIP has ".", (split(ClientIP,":")[1]),
+    ClientIP has "[", tostring(split(ClientIP,"]:")[1]),
+    ClientIP)
+| project TimeGenerated, UserId, UserDomain, subDomain, Operation, ForwardedtoDomain, ClientIPAddress, Result, Port, OriginatingServer, OfficeObjectId, fwdingDestination
+| extend AccountName = tostring(split(UserId, "@")[0]), AccountUPNSuffix = tostring(split(UserId, "@")[1])

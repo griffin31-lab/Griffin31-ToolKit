@@ -1,0 +1,50 @@
+id: 4f73d618-2a59-4c8e-b7f0-9d3a2e1b5c64
+name: Mass SharePoint / OneDrive File Download
+description: |
+  Fires when a single user downloads or syncs an unusually large number of files
+  from SharePoint or OneDrive in a short window, relative to their 14-day
+  baseline. A core post-compromise exfiltration pattern — both in external
+  breaches (credential theft leading to data grab) and insider risk cases.
+severity: High
+requiredDataConnectors:
+  - connectorId: Office365
+    dataTypes:
+      - OfficeActivity
+queryFrequency: 1h
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - Exfiltration
+  - Collection
+relevantTechniques:
+  - T1530
+  - T1567.002
+  - T1213.002
+query: |
+  let Threshold = 200;
+  let BaselineDays = 14;
+  let baseline = OfficeActivity
+    | where TimeGenerated between (ago(BaselineDays * 1d) .. ago(1h))
+    | where RecordType in ("SharePointFileOperation", "OneDrive")
+    | where Operation in ("FileDownloaded", "FileSyncDownloadedFull", "FileAccessed")
+    | summarize BaselineDownloads = count() / (BaselineDays * 24) by UserId;
+  OfficeActivity
+  | where TimeGenerated > ago(1h)
+  | where RecordType in ("SharePointFileOperation", "OneDrive")
+  | where Operation in ("FileDownloaded", "FileSyncDownloadedFull")
+  | summarize HourlyDownloads = count(), FilesSample = make_set(OfficeObjectId, 10) by UserId, ClientIP
+  | join kind=leftouter (baseline) on UserId
+  | where HourlyDownloads > Threshold and HourlyDownloads > (BaselineDownloads * 5)
+  | project UserId, ClientIP, HourlyDownloads, BaselineDownloads, FilesSample
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: UserId
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: ClientIP
+version: 1.0.0
+kind: Scheduled

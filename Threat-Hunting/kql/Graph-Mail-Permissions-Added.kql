@@ -1,0 +1,104 @@
+// Name: Graph Mail.* Permissions Added to an App
+// Description: Surfaces every OAuth grant where an app receives a Mail.* Graph permission
+//              (Mail.Read, Mail.ReadWrite, Mail.Send, Mail.*.All, etc.). Rolled up per
+//              ServicePrincipal so you see the cumulative mail-plane blast radius of each app.
+// MITRE ATT&CK: T1098.002 (Account Manipulation: Additional Email Delegate Permissions),
+//               T1114.002 (Email Collection: Remote Email Collection),
+//               T1528 (Steal Application Access Token)
+// Data Source: AuditLogs (Entra ID directory audit log)
+// Platform:    Microsoft Sentinel / Log Analytics
+// Time window: Default AuditLogs retention (14-30d)
+// Reference:   ./Graph-Mail-Permissions-Added.md
+// Context:     Mailbox is the single highest-value target in M365 — it contains credentials,
+//              MFA codes, password-reset links, invoice wire-instructions, and deal context.
+//              OAuth phishing kits like EvilProxy / Tycoon and nation-state actors (Midnight
+//              Blizzard) specifically target Mail.* scopes to pivot from one compromised
+//              identity into long-tail mail access that survives password resets.
+//
+// Recommended actions on hits:
+// - Flag any Mail.*.All grant — tenant-wide mail access should be rare and reviewed
+// - Review apps with many distinct Mail.* permissions — legitimate apps usually need one or two
+// - Pivot by ServicePrincipalAppId into OfficeActivity to see mailbox reads / item movements
+// - If unfamiliar, revoke consent in Entra > Enterprise apps and rotate affected user credentials
+//
+// ---------------------------------------------------------------------------
+// Extended context, background, tuning, and attribution
+// ---------------------------------------------------------------------------
+//
+// # Graph Mail.* Permissions Added to an App
+//
+// <sub>[← Back to KQL index](../README.md)</sub>
+//
+// ## Why this hunt
+//
+// Email is the single most abused M365 data surface. If an attacker can read a mailbox they can:
+//
+// - Intercept MFA codes and password-reset links (account takeover)
+// - Harvest credentials, API keys, and secrets sitting in inbox history
+// - Run BEC / wire-fraud plays with conversation context
+// - Maintain persistence invisibly — reading mail does not generate a sign-in for the victim
+//
+// OAuth-based mail access survives password resets, MFA resets, and most session-revocation actions because the app holds its own refresh token. That is why OAuth phishing (EvilProxy, Tycoon, Mamba 2FA) targets `Mail.*` scopes — the access is durable in a way that a phished credential is not.
+//
+// This hunt rolls every `Mail.*` OAuth grant up to the service principal, so you see the cumulative mail blast radius per app, not just per event.
+//
+// ## Expected output
+//
+// | Column | Meaning |
+// |---|---|
+// | `TotalPermissions` | How many distinct Mail.* scopes the app accumulated |
+// | `ServicePrincipalAppId` | Entra App ID (use to pivot to sign-in and Office activity) |
+// | `InitiatedByUserPrincipalName` | Who granted the permission(s) |
+// | `IP` | IP the grant was performed from |
+// | `Permissions` | Array of the actual Mail.* scopes added |
+//
+// A healthy tenant has a small set of known apps with Mail.* (often just Outlook, Teams, approved backup / DLP / eDiscovery apps). Anything else is worth a look.
+//
+// ### Red flags
+//
+// - `Mail.Read.All` or `Mail.ReadWrite.All` granted by a non-admin
+// - Multiple Mail.* scopes granted in one event (attacker over-consent)
+// - New or recently created service principal accumulating mail permissions
+// - IP address that does not match the granter's usual geography
+//
+// ## Tuning notes
+//
+// - **Noise source:** Outlook and Teams themselves show up here during onboarding — keep a known-good allow-list of AppIds.
+// - **Narrow the hunt:** append `| where Permissions has_any ("Mail.ReadWrite.All", "Mail.Send", "Mail.Read.All")` for the highest-risk subset.
+// - **Follow the audit trail:** once you find a suspicious app, query `OfficeActivity` filtered on `ClientAppId == ServicePrincipalAppId` to see every item read.
+//
+// ## Recommended hardening
+//
+// 1. **Application Access Policies** — scope `Mail.*.All` to a specific mailbox or distribution group using `New-ApplicationAccessPolicy` in Exchange Online. This is the strongest preventive control: even if the app has `Mail.ReadWrite.All`, Exchange refuses access outside the allow-list.
+// 2. **Admin consent workflow** — force user consent requests for high-impact scopes into an admin review queue.
+// 3. **App governance in Defender for Cloud Apps** — flags Mail-read apps with rare community use, anomalous Graph activity, or suspicious reply URLs.
+// 4. **Rotate app credentials** quarterly; prefer certificate auth with short-lived certificates over client secrets.
+// 5. **Conditional Access for workload identities** — require a compliant IP or a specific cert/managed identity for high-impact apps.
+//
+// ## References
+//
+// - [Limit mailbox access (Application Access Policies)](https://learn.microsoft.com/en-us/graph/auth-limit-mailbox-access)
+// - [Graph permissions reference](https://learn.microsoft.com/en-us/graph/permissions-reference)
+// - [MITRE ATT&CK T1098.002 — Additional Email Delegate Permissions](https://attack.mitre.org/techniques/T1098/002/)
+// - [MITRE ATT&CK T1114.002 — Remote Email Collection](https://attack.mitre.org/techniques/T1114/002/)
+// - [Microsoft Threat Intelligence: Midnight Blizzard OAuth abuse](https://www.microsoft.com/en-us/security/blog/2024/01/25/midnight-blizzard-guidance-for-responders-on-nation-state-attack/)
+//
+// ## Source & attribution
+//
+// > Source: [Bert-JanP/Hunting-Queries-Detection-Rules — Azure Active Directory/GraphMailPermissions.md](https://github.com/Bert-JanP/Hunting-Queries-Detection-Rules/blob/main/Azure%20Active%20Directory/GraphMailPermissions.md) · BSD-3-Clause License
+
+AuditLogs
+| where Category == "ApplicationManagement"
+| where ActivityDisplayName in ("Add delegated permission grant", "Add app role assignment to service principal")
+| mv-expand TargetResources
+| where TargetResources.displayName == "Microsoft Graph"
+| mv-expand TargetResources.modifiedProperties
+| extend InitiatedByUserPrincipalName = tostring(InitiatedBy.user.userPrincipalName)
+| extend AddedPermission = replace_string(tostring(TargetResources_modifiedProperties.newValue),'"','')
+| extend IP = tostring(todynamic(InitiatedBy).user.ipAddress)
+| extend ServicePrincipalAppId = iff(OperationName == "Add delegated permission grant", replace_string(tostring(todynamic(TargetResources).modifiedProperties[2].newValue),'"','') , replace_string(tostring(todynamic(TargetResources).modifiedProperties[5].newValue),'"',''))
+| where AddedPermission has_all ("Mail", ".")
+| summarize Permissions = make_set(AddedPermission) by ServicePrincipalAppId, IP, InitiatedByUserPrincipalName
+| extend TotalPermissions = array_length(Permissions)
+| project TotalPermissions, ServicePrincipalAppId, InitiatedByUserPrincipalName, IP, Permissions
+| sort by TotalPermissions

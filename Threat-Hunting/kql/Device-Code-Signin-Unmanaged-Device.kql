@@ -1,0 +1,114 @@
+// Name: Device Code Flow Sign-In From Unmanaged Device
+// Description: Detects successful Entra ID sign-ins using the OAuth 2.0 device code
+//              authentication flow where the resulting device is not managed by the
+//              organization (empty DeviceId). Device code phishing (Storm-2372 and
+//              similar campaigns) actively abuses this flow because the victim
+//              authenticates from their own browser/device — defeating AiTM proxy
+//              fingerprinting and many risk signals.
+// MITRE ATT&CK: T1566.002 (Phishing: Spearphishing Link),
+//               T1078.004 (Valid Accounts: Cloud Accounts),
+//               T1528 (Steal Application Access Token)
+// Data Source: SigninLogs (Entra ID)  /  AADSignInEventsBeta (Advanced Hunting)
+// Platform:    Microsoft Sentinel / Log Analytics  (Defender XDR variant also supported)
+// Time window: 7 days (tune per environment)
+// Reference:   ./Device-Code-Signin-Unmanaged-Device.md
+// Context:     Device code flow was designed for input-constrained devices (TVs, CLI
+//              tools, IoT) — the user reads a short code from one device and enters
+//              it on a full-browser device. Attackers phish the short code in messaging
+//              apps ("paste this to join the meeting"), the user pastes it into a real
+//              Microsoft page, and the attacker receives the resulting tokens on their
+//              end. Storm-2372 used this pattern at scale through early 2025.
+//
+// Recommended actions on hits:
+// - Confirm with the user out-of-band that they intended to use a device-code-flow app
+// - Check the AppId — some legitimate Azure CLI / PowerShell usage is normal; unfamiliar apps are not
+// - For unexplained hits: revoke the user's sessions and refresh tokens, reset password
+// - Block device code flow tenant-wide via Conditional Access where feasible
+//
+// ---------------------------------------------------------------------------
+// Extended context, background, tuning, and attribution
+// ---------------------------------------------------------------------------
+//
+// # Device Code Flow Sign-In From Unmanaged Device
+//
+// <sub>[← Back to KQL index](../README.md)</sub>
+//
+// ## Why this hunt
+//
+// OAuth 2.0 device code flow was designed for a specific niche: input-constrained devices (smart TVs, CLI tools, IoT) where you can't reasonably run a browser. The flow:
+//
+// 1. The "device" asks Microsoft for a short user code (`A1B2-C3D4`) and a verification URL (`microsoft.com/devicelogin`).
+// 2. The user opens the URL on a normal device with a browser, enters the code, and authenticates — including MFA and CA.
+// 3. Microsoft returns tokens to the original "device".
+//
+// The attack pattern, popularized by **Storm-2372** through 2024–2025, weaponizes this:
+//
+// 1. Attacker initiates a device code flow from their own infrastructure.
+// 2. Attacker sends the real Microsoft short code to the victim via Teams, WhatsApp, Signal, or email. The social engineering pretext is usually "paste this to join the meeting" or "complete this step to access the shared document".
+// 3. The victim authenticates on their own browser — real Microsoft login page, real MFA, real CA. **Everything looks legitimate from the victim's perspective.**
+// 4. Microsoft returns tokens to the attacker's infrastructure.
+//
+// This beats AiTM defenses (no reverse proxy, no custom domain fingerprint), bypasses most sign-in risk scoring (the browser, IP, and device are the legitimate user's), and grants the attacker durable OAuth tokens.
+//
+// The detection leverage: device code flow **is almost never used legitimately** from unmanaged devices. Legitimate use is Azure CLI, PowerShell, or VS Code Azure extensions — which typically register a device. A successful device-code sign-in from an unmanaged device (`DeviceId` empty) is a strong phishing indicator.
+//
+// ## Expected output
+//
+// | Column | Meaning |
+// |---|---|
+// | `TimeGenerated` | When |
+// | `UserPrincipalName` | Victim |
+// | `AppDisplayName`, `AppId` | Which app the attacker initiated for — this is the real discriminator |
+// | `Location`, `IPAddress` | Victim's location (not attacker's — that's the deception) |
+// | `RiskLevelDuringSignIn` | Sometimes none; don't rely on this alone |
+//
+// ### Red flags
+//
+// - `AppId = 29d9ed98-a469-4536-ade2-f981bc1d605e` — Microsoft Authentication Broker; Storm-2372 frequently used this
+// - Unfamiliar `AppDisplayName` that is not Azure CLI / PowerShell / Visual Studio Code
+// - Burst of the same AppId + different UserPrincipalNames in a short window (campaign)
+// - User has no developer role but just signed into a developer-oriented app
+//
+// ## Tuning notes
+//
+// - **Noise:** legitimate Azure CLI usage from developer laptops will show up if those laptops are not Entra-joined. Allow-list Azure CLI (`04b07795-8ddb-461a-bbee-02f9e1bf7b46`) + your dev team's UPNs if it dominates the signal.
+// - **Defender XDR variant:** the companion query in the source file targets `AADSignInEventsBeta` with `EndpointCall == "Cmsi:Cmsi"` — use that in Advanced Hunting where SigninLogs isn't available.
+// - **For alerting:** run hourly; severity high.
+//
+// ## Recommended hardening
+//
+// 1. **Conditional Access: Block Device Code Flow** — as of 2023 Entra supports targeting device code flow as an authentication protocol condition. Block it for all users who don't need it (probably 95%+ of the tenant), allow it for a small developer group only. This is the single most effective control.
+// 2. **Require Compliant Device** on high-impact apps — turns the "unmanaged device" portion of the attack into a hard failure.
+// 3. **Token Protection** — binds tokens to the originating device; attacker cannot replay.
+// 4. **User awareness** — train users to never paste a short code they didn't personally initiate. Include device-code phishing in quarterly sim campaigns.
+//
+// ## References
+//
+// - [Microsoft Threat Intelligence: Storm-2372 device code phishing](https://www.microsoft.com/en-us/security/blog/2025/02/13/storm-2372-conducts-device-code-phishing-campaign/)
+// - [Jeffrey Appel: Protect against device code flow abuse](https://jeffreyappel.nl/how-to-protect-against-device-code-flow-abuse-storm-2372-attacks-and-block-the-authentication-flow/)
+// - [Entra CA: Authentication flows condition](https://learn.microsoft.com/en-us/entra/identity/conditional-access/concept-conditional-access-cloud-apps#authentication-flows)
+// - [MITRE ATT&CK T1528 — Steal Application Access Token](https://attack.mitre.org/techniques/T1528/)
+//
+// ## Source & attribution
+//
+// > Source: [Bert-JanP/Hunting-Queries-Detection-Rules — Azure Active Directory/SuccessfulDeviceCodeAuthenticationUnmanagedDevice.md](https://github.com/Bert-JanP/Hunting-Queries-Detection-Rules/blob/main/Azure%20Active%20Directory/SuccessfulDeviceCodeAuthenticationUnmanagedDevice.md) · BSD-3-Clause License
+
+SigninLogs
+// Filter only successful sign-ins
+| where ResultType == 0
+| where AuthenticationProtocol == "deviceCode"
+// Filter on unmanaged devices (no Entra-joined / registered device ID)
+| where isempty(DeviceDetail.deviceId)
+| extend operatingSystem = tostring(DeviceDetail.operatingSystem)
+// Optionally narrow to risk sign-ins
+//| where RiskLevelDuringSignIn != "none"
+| project-reorder
+    TimeGenerated,
+    UserPrincipalName,
+    AuthenticationProtocol,
+    ResultType,
+    RiskLevelDuringSignIn,
+    AppDisplayName,
+    AppId,
+    Location,
+    IPAddress

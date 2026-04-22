@@ -1,0 +1,46 @@
+id: a9c17e64-8b35-4f21-9d82-0c5f4e7b1a39
+name: High-Privilege Entra Role Assigned
+description: |
+  Fires when a user or service principal is assigned a high-privilege Entra role
+  (Global Administrator, Privileged Role Administrator, Security Administrator,
+  Application Administrator, Cloud Application Administrator, Exchange
+  Administrator, Hybrid Identity Administrator). Assignments outside an approved
+  PIM workflow or by a non-admin initiator are high-fidelity signals of
+  privilege escalation or tenant persistence.
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AuditLogs
+queryFrequency: 1h
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - PrivilegeEscalation
+  - Persistence
+relevantTechniques:
+  - T1098.003
+  - T1078.004
+query: |
+  let HighPrivRoles = dynamic(["Global Administrator", "Privileged Role Administrator", "Security Administrator", "Application Administrator", "Cloud Application Administrator", "Exchange Administrator", "Hybrid Identity Administrator", "User Administrator", "Privileged Authentication Administrator"]);
+  AuditLogs
+  | where TimeGenerated > ago(1h)
+  | where OperationName in ("Add member to role", "Add eligible member to role", "Add member to role in PIM completed (permanent)")
+  | extend RoleName = tostring(TargetResources[0].modifiedProperties[1].newValue)
+  | extend TargetUser = tostring(TargetResources[0].userPrincipalName)
+  | extend InitiatedByUser = tostring(parse_json(tostring(InitiatedBy.user)).userPrincipalName)
+  | extend InitiatedByApp = tostring(parse_json(tostring(InitiatedBy.app)).displayName)
+  | where RoleName has_any (HighPrivRoles)
+  | project TimeGenerated, RoleName, TargetUser, InitiatedByUser, InitiatedByApp, OperationName, Result, CorrelationId
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: TargetUser
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: InitiatedByUser
+version: 1.0.0
+kind: Scheduled

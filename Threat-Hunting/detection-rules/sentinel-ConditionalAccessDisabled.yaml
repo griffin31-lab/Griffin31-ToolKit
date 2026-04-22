@@ -1,0 +1,41 @@
+id: 9a14e7c5-6b83-4f29-8d02-5e3c6a0b8f17
+name: Conditional Access Policy Disabled or Deleted
+description: |
+  Detects disabling or deletion of a Conditional Access policy in Entra ID. CA
+  is the single most important preventive control in M365 — disabling a policy
+  is either a sanctioned admin action or a deliberate defense-evasion step by
+  an attacker with Security Administrator or Global Administrator rights. Every
+  hit should be traced back to a change-management ticket.
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AuditLogs
+queryFrequency: 15m
+queryPeriod: 15m
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - DefenseEvasion
+  - Persistence
+relevantTechniques:
+  - T1562.007
+  - T1556.009
+query: |
+  AuditLogs
+  | where TimeGenerated > ago(15m)
+  | where LoggedByService == "Conditional Access"
+  | where OperationName in ("Update conditional access policy", "Delete conditional access policy", "Disable Strong Authentication", "Disable Per User MFA")
+  | extend PolicyName = tostring(TargetResources[0].displayName)
+  | extend InitiatedByUser = tostring(parse_json(tostring(InitiatedBy.user)).userPrincipalName)
+  | extend OldValue = tostring(TargetResources[0].modifiedProperties[0].oldValue)
+  | extend NewValue = tostring(TargetResources[0].modifiedProperties[0].newValue)
+  | where (OldValue has "enabled" and NewValue has "disabled") or OperationName has "Delete"
+  | project TimeGenerated, OperationName, PolicyName, InitiatedByUser, OldValue, NewValue, CorrelationId
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: InitiatedByUser
+version: 1.0.0
+kind: Scheduled

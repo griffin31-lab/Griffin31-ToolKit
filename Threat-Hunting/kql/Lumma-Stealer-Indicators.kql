@@ -1,0 +1,87 @@
+// Name: Lumma Stealer / Infostealer Indicators
+// Description: Surfaces outbound HTTP traffic matching the TeslaBrowser/5.5 user agent
+//              pattern that Lumma Stealer (Microsoft: Storm-2477) and related infostealer
+//              families have used in the wild.
+// MITRE ATT&CK: T1555 (Credentials from Password Stores),
+//               T1555.003 (Credentials from Web Browsers),
+//               T1041 (Exfiltration Over C2 Channel)
+// Data Source: DeviceNetworkEvents (Microsoft Defender for Endpoint)
+// Platform:    Microsoft Defender XDR / Microsoft Sentinel
+// Time window: 7 days (tune to match MDE retention)
+// Reference:   ./Lumma-Stealer-Indicators.md
+// Context:     Lumma Stealer is the infostealer family that seeded the Vercel / Context.ai
+//              breach chain (April 2026). Microsoft tracks it as Storm-2477. Infostealers
+//              are the primary upstream source of the stolen OAuth tokens, browser cookies,
+//              and session cookies that drive token-replay attacks against M365 / Entra ID.
+//
+// Recommended actions on hits:
+// - Isolate the device in Defender for Endpoint
+// - Rotate credentials and revoke all refresh tokens for the signed-in user (Entra)
+// - Pull browser cookie stores for forensics before wiping
+// - Pivot on RemoteIP / RemoteUrl to find other infected endpoints
+// - Check for downstream OAuth consent grants authored by the same user
+//
+// ---------------------------------------------------------------------------
+// Extended context, background, tuning, and attribution
+// ---------------------------------------------------------------------------
+//
+// # Lumma Stealer / Infostealer Indicators
+//
+// <sub>[← Back to KQL index](../README.md)</sub>
+//
+// ## Why this hunt
+//
+// Lumma Stealer (tracked by Microsoft as **Storm-2477**) is the infostealer that sat upstream of the Vercel / Context.ai breach chain in April 2026. Infostealers are now the single largest source of stolen browser cookies, saved passwords, and OAuth refresh tokens feeding identity-based attacks against M365 and Entra ID tenants.
+//
+// Rather than rely on static file hashes (attackers repack payloads constantly), this hunt pivots on a **network-layer indicator**: Lumma variants have been repeatedly observed exfiltrating stolen data over HTTP GET requests that advertise a distinctive `TeslaBrowser/5.5` User-Agent string. This string is not used by any legitimate software.
+//
+// ## Expected output
+//
+// | Column | Meaning |
+// |---|---|
+// | `DeviceName` | Infected endpoint |
+// | `RemoteIP` / `RemoteUrl` | Lumma drop / C2 destination — pivot on these |
+// | `user_agent` | Should contain `TeslaBrowser` |
+// | `InitiatingProcessFileName` | Often a packed, recently created executable in `%TEMP%` or `%APPDATA%` |
+//
+// A legitimate tenant should see **zero** results. Any hit is high-signal.
+//
+// ## Tuning notes
+//
+// - `HttpConnectionInspected` depends on Defender network inspection being enabled on the device. If you see no `HttpConnectionInspected` events at all, confirm MDE network protection is running.
+// - To extend the hunt to other infostealers with known UA tells (RedLine, Vidar, StealC), add their strings to a `let` dynamic list.
+// - Run on a rolling 24h window and promote to a scheduled analytic rule for immediate alerting.
+//
+// ## Recommended hardening
+//
+// 1. **Block device code flow** in Conditional Access — infostealers commonly exfil via this path
+// 2. **Enable Token Protection** (Conditional Access) — binds sign-in tokens to the originating device, which breaks cookie replay
+// 3. **Require Phishing-Resistant MFA** (FIDO2, Windows Hello for Business, passkey) — neutralizes cookie-only access
+// 4. **Turn on Microsoft Defender for Endpoint Web Protection** and Smartscreen
+// 5. **Enable ASR rule** — *Block credential stealing from the Windows local security authority subsystem (lsass.exe)* (`9e6c4e1f-7d60-472f-ba1a-a39ef669e4b2`)
+// 6. **Disable saved passwords in browsers** via Edge / Chrome policy for privileged accounts
+// 7. **Restrict unmanaged devices** from accessing M365 — infostealers are overwhelmingly a BYOD/unmanaged-device problem
+//
+// ## Source & attribution
+//
+// Query adapted from **cyb3rmik3/KQL-threat-hunting-queries** — `02.ThreatDetection/lumma-stealer-using-tesla-browser-useragent.md` (MIT). Original reference: Darktrace — *The Rise of the Lumma Info Stealer*.
+//
+// ## References
+//
+// - [Microsoft: Storm-2477 / Lumma Stealer threat actor reference](https://learn.microsoft.com/en-us/unified-secops-platform/threat-actor-naming)
+// - [MITRE ATT&CK T1555.003 — Credentials from Web Browsers](https://attack.mitre.org/techniques/T1555/003/)
+// - [MITRE ATT&CK T1041 — Exfiltration Over C2 Channel](https://attack.mitre.org/techniques/T1041/)
+// - [Darktrace: The Rise of the Lumma Info Stealer](https://darktrace.com/blog/the-rise-of-the-lumma-info-stealer)
+
+DeviceNetworkEvents
+| where Timestamp > ago(7d)
+| where ActionType == "HttpConnectionInspected"
+| extend json = todynamic(AdditionalFields)
+| extend direction = tostring(json.direction),
+         method = tostring(json.method),
+         user_agent = tostring(json.user_agent)
+| where direction == "Out"
+| where method == "GET"
+| where user_agent contains "TeslaBrowser"
+| project Timestamp, DeviceName, RemoteIP, RemotePort, RemoteUrl, user_agent, InitiatingProcessFileName, InitiatingProcessCommandLine
+| sort by Timestamp desc

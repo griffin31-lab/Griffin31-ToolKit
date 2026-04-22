@@ -1,0 +1,124 @@
+// Name: DNS Tunneling / Exfiltration Indicators
+// Description: Surfaces DNS queries with characteristics of tunneled exfiltration or C2:
+//              (1) unusually long fully-qualified domain names (payload in the subdomain),
+//              (2) high volume of TXT / NULL queries to a single parent domain,
+//              (3) high unique-subdomain counts per parent domain (beacon fan-out).
+// MITRE ATT&CK: T1071.004 (Application Layer Protocol: DNS),
+//               T1048.003 (Exfiltration Over Alternative Protocol),
+//               T1572 (Protocol Tunneling)
+// Data Source: DeviceNetworkEvents (Microsoft Defender for Endpoint)
+// Platform:    Microsoft Defender XDR / Microsoft Sentinel
+// Time window: 1 day (DNS telemetry is high-volume)
+// Reference:   ./DNS-Tunneling-Indicators.md
+// Context:     DNS tunneling (iodine, dnscat2, DNSExfiltrator, Cobalt Strike DNS beacon)
+//              encodes data in sub-domain labels of DNS queries to an attacker-controlled
+//              authoritative server. Because DNS usually traverses enterprise egress even
+//              when other protocols are filtered, it remains a reliable covert channel.
+//
+// Recommended actions on hits:
+// - Review the parent domain (last two labels) — if unknown, check passive DNS / WHOIS
+// - Pivot on DeviceName to find the implant process
+// - Add the parent domain to your DNS sinkhole
+// - Preserve memory for the infected host; DNS beacons often live only in memory
+//
+// ---------------------------------------------------------------------------
+// Extended context, background, tuning, and attribution
+// ---------------------------------------------------------------------------
+//
+// # DNS Tunneling / Exfiltration Indicators
+//
+// <sub>[← Back to KQL index](../README.md)</sub>
+//
+// ## Why this hunt
+//
+// DNS is the protocol of last resort — it usually gets through enterprise egress even when HTTP, HTTPS, and direct IP connections are blocked. Attackers with network constraints tunnel command-and-control and exfiltration over it using tooling like **dnscat2**, **iodine**, **DNSExfiltrator**, and the **Cobalt Strike DNS beacon**.
+//
+// The general pattern is the same across tools:
+//
+// 1. The implant encodes its data (Base32, Base64, or custom) into the **subdomain labels** of a DNS query
+// 2. It queries the attacker's authoritative server, which extracts the data from the query name
+// 3. Responses are returned in TXT / NULL / CNAME record answers
+//
+// This hunt surfaces two telltale byproducts:
+// - **Abnormally long fully-qualified domain names** — legitimate FQDNs rarely exceed 60-70 chars; tunneled payloads push this into 150-250 chars
+// - **High unique-subdomain counts under a single parent domain** within a short window — the beacon generates hundreds of unique labels per hour
+//
+// ## Expected output
+//
+// | Column | Meaning |
+// |---|---|
+// | `Signal` | `LongFqdn` (single long query) or `HighSubdomainFanout` (aggregate over 1h) |
+// | `Parent` | The parent domain to investigate — e.g., `attacker.com` |
+// | `Fqdn` | A representative full query (contains the encoded payload for long-label hits) |
+// | `QueryLen` | Length of the FQDN, or total query count for fanout |
+// | `DeviceName` | The infected host |
+//
+// A normal tenant has a short tail of long FQDNs from CDN hostnames (`abc123def456.cloudfront.net`, `xyz.azureedge.net`). Legitimate CDN traffic tends to be concentrated on a small set of parent domains — tunneling shows up as a new unknown parent.
+//
+// ## Tuning notes
+//
+// - **CDN false positives dominate** without a tuned baseline. Build an allow-list of your top 50 known-good parent domains (akamai, cloudfront, azureedge, fastly, cloudflare, etc.) and filter those out of `Parent`.
+// - `ActionType has "DnsQuery"` captures events where MDE logs DNS queries as part of network inspection. If your tenant doesn't surface these, join to `DnsEvents` from the Windows DNS connector instead.
+// - Threshold `MinQueryLength = 70` and `UniqueSubdomainCount = 30` are starting points — tune per tenant. A quieter baseline (small org, consistent web stack) can lower thresholds aggressively.
+// - Combine with a **TXT-record-volume** sub-query if you have DNS server logs — tunneling often prefers TXT responses
+//
+// ## Recommended hardening
+//
+// 1. **Use a managed DNS resolver with filtering** — Microsoft's *DNS Protection for Servers* (preview), Cisco Umbrella, Infoblox BloxOne, Quad9 Enterprise. These block known DNS-tunneling providers by category.
+// 2. **Restrict outbound DNS** to authorized resolvers only — block `UDP/53` and `TCP/53` from endpoints directly to the internet at the firewall
+// 3. **Enable DNS Security Extensions (DNSSEC)** where possible to detect tampering (tangential to tunneling but good hygiene)
+// 4. **DNS over HTTPS / DNS over TLS** — control-plane hardening; ensure endpoints use the sanctioned DoH resolver so you still get logs
+// 5. **Rate-limit** suspiciously long / high-volume queries at the resolver
+// 6. **Sinkhole new and dormant domains** in the first 24h of their life (many tunneling domains are freshly registered) — services like *DomainTools newly registered domains feed*
+//
+// ## Source & attribution
+//
+// Query composed from patterns across two MIT-licensed sources:
+// - **reprise99/Sentinel-Queries** — `DNS/DnsEvents-FindStaleDomains.kql` (high-volume-to-single-domain pattern)
+// - **Bert-JanP/Hunting-Queries-Detection-Rules** — `Defender For Endpoint/dns-requests-to-suspicious-tlds.md` (FQDN tokenization idiom)
+//
+// Length / fan-out thresholds drawn from public research on `dnscat2` and the Cobalt Strike DNS beacon traffic profile.
+//
+// ## References
+//
+// - [MITRE ATT&CK T1071.004 — DNS](https://attack.mitre.org/techniques/T1071/004/)
+// - [MITRE ATT&CK T1572 — Protocol Tunneling](https://attack.mitre.org/techniques/T1572/)
+// - [Microsoft Learn: Microsoft Defender for DNS](https://learn.microsoft.com/en-us/azure/defender-for-cloud/defender-for-dns-introduction)
+// - [SANS: Detecting DNS Tunneling](https://www.sans.org/white-papers/34152/)
+
+let MinQueryLength       = 70;   // FQDN character length threshold
+let UniqueSubdomainCount = 30;   // per-parent-domain fan-out in 1h
+let ParentDomain = (fqdn:string) {
+    strcat(
+        tostring(split(fqdn, ".")[-2]), ".",
+        tostring(split(fqdn, ".")[-1])
+    )
+};
+// ---- Block 1: Abnormally long FQDNs (candidate for label-encoded exfil) ----
+let LongLabelQueries =
+    DeviceNetworkEvents
+    | where Timestamp > ago(1d)
+    | where ActionType has "DnsQuery" or isnotempty(RemoteUrl)
+    | extend Fqdn = iff(isnotempty(RemoteUrl), tolower(RemoteUrl), tolower(tostring(parse_json(AdditionalFields).DnsQueryString)))
+    | where isnotempty(Fqdn)
+    | where strlen(Fqdn) >= MinQueryLength
+    | extend Parent = ParentDomain(Fqdn)
+    | project Timestamp, DeviceName, Signal = "LongFqdn",
+              Parent, Fqdn, QueryLen = strlen(Fqdn),
+              InitiatingProcessFileName;
+// ---- Block 2: High unique-subdomain count per parent (fan-out) ----
+let FanoutByParent =
+    DeviceNetworkEvents
+    | where Timestamp > ago(1d)
+    | where ActionType has "DnsQuery" or isnotempty(RemoteUrl)
+    | extend Fqdn = iff(isnotempty(RemoteUrl), tolower(RemoteUrl), tolower(tostring(parse_json(AdditionalFields).DnsQueryString)))
+    | where isnotempty(Fqdn)
+    | extend Parent = ParentDomain(Fqdn)
+    | summarize UniqueFqdns = dcount(Fqdn), TotalQueries = count(), SampleFqdn = take_any(Fqdn)
+               by DeviceName, Parent, bin(Timestamp, 1h)
+    | where UniqueFqdns >= UniqueSubdomainCount
+    | project Timestamp, DeviceName, Signal = "HighSubdomainFanout",
+              Parent, Fqdn = SampleFqdn, QueryLen = TotalQueries,
+              InitiatingProcessFileName = "";
+union LongLabelQueries, FanoutByParent
+| sort by Timestamp desc

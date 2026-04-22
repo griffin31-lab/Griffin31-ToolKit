@@ -1,0 +1,92 @@
+// Name: Exchange Online Audit Log Disabled (Mailbox or Tenant)
+// Description: Detects Set-AdminAuditLogConfig operations that turn off admin audit
+//              logging in Exchange Online — a direct Defense Evasion move that
+//              blinds detection for subsequent mailbox activity.
+// MITRE ATT&CK: T1562.008 (Impair Defenses: Disable Cloud Logs),
+//               T1562    (Impair Defenses)
+// Data Source: OfficeActivity (Exchange workload)
+// Platform:    Microsoft Sentinel / Log Analytics
+// Time window: 1 day
+// Reference:   ./Exchange-Audit-Log-Disabled.md
+// Context:     A defender disabling audit logs is virtually always malicious or
+//              prelude-to-incident. Only Global / Exchange admins can run
+//              Set-AdminAuditLogConfig. Combined with forwarding-rule creation, this
+//              is a textbook BEC-with-cover attack chain.
+//
+// Recommended actions on hits:
+// - Immediately re-enable: Set-AdminAuditLogConfig -AdminAuditLogEnabled $true
+// - Treat the UserId as compromised; revoke sessions and require password + MFA reset
+// - Preserve the existing log data before the window of disablement closes
+// - Review all Exchange admin activity in the preceding 24 hours by this user
+// - Check for additional changes: mailbox forwarding, inbox rules, role-group changes
+//
+// ---------------------------------------------------------------------------
+// Extended context, background, tuning, and attribution
+// ---------------------------------------------------------------------------
+//
+// # Exchange Online Audit Log Disabled
+//
+// <sub>[← Back to KQL index](../README.md)</sub>
+//
+// > Source: [Azure-Sentinel / Solutions/Microsoft 365/Analytic Rules/exchange_auditlogdisabled.yaml](https://github.com/Azure/Azure-Sentinel/blob/master/Solutions/Microsoft%20365/Analytic%20Rules/exchange_auditlogdisabled.yaml) · MIT License
+//
+// ## Why this hunt
+//
+// `Set-AdminAuditLogConfig -AdminAuditLogEnabled $false` is the Exchange Online command that disables admin audit logging. An attacker who runs it is explicitly trying to **blind the tenant's audit trail** before performing a more sensitive operation (setting up forwarding, running compliance searches, accessing other mailboxes).
+//
+// Why this is almost always malicious:
+//
+// - The operation requires the **Organization Management** or equivalent role — highly privileged
+// - Legitimate admins nearly never disable audit logging; they enable it
+// - The classic kill-chain pattern is: disable audit → configure forwarding → re-enable audit (or not) → wait
+//
+// MITRE tracks this under **T1562.008** (Impair Defenses: Disable Cloud Logs). It frequently precedes T1114 (Email Collection) and T1020 (Automated Exfiltration).
+//
+// ## Expected output
+//
+// | Column | What it tells you |
+// |---|---|
+// | `StartTimeUtc` / `EndTimeUtc` | When the change was made (and when it was undone, if re-enabled) |
+// | `UserId` | The admin account that ran the cmdlet — treat as compromised until proven otherwise |
+// | `ClientIP` | Source IP — pivot for geo / known-bad / AiTM indicators |
+// | `Parameters` | Full PowerShell parameter blob for forensics |
+// | `AdminAuditLogEnabledValue` | Will be "False" for all hits |
+// | `OperationCount` | If > 1, admin ran this multiple times (toggling to cover individual ops) |
+//
+// A healthy tenant returns **zero hits, ever**. Any hit is high-severity by default.
+//
+// ## Tuning notes
+//
+// - **No time filter in base query** — relies on workspace retention / scheduled rule period. For scheduled analytic, use `queryFrequency: 1h` and `queryPeriod: 1h`
+// - **Legitimate "break-glass"** — no legitimate maintenance operation requires this; do **not** allow-list it
+// - **Mailbox-level audit (separate control)** — this query covers tenant admin audit. The per-mailbox audit control is `Set-Mailbox -AuditEnabled $false`. To detect the mailbox-level variant, add `or Operation =~ "Set-Mailbox"` and filter `Parameters` for `"AuditEnabled"; "False"`
+// - **Severity** — even in an investigation / DR restore scenario, this action should trigger a formal change-ticket review
+//
+// ## Recommended hardening
+//
+// 1. **Tenant-level audit log immutability** — Purview compliance manager: ensure `UnifiedAuditLogIngestionEnabled = True` and that `Set-AdminAuditLogConfig` changes flow to Sentinel / SIEM with 2-hour alerting SLO
+// 2. **Conditional Access on Exchange Online PowerShell** — require compliant device + phishing-resistant MFA for Exchange admin access
+// 3. **Privileged Identity Management (PIM)** — no standing Exchange / Org Mgmt assignments. Just-in-time, 1-hour max
+// 4. **Separate logging tenant / immutable storage** — forward the Unified Audit Log to an external store (Sentinel workspace in a different subscription with `ImmutabilityPolicy`) so an attacker with Exchange admin cannot delete history
+// 5. **Out-of-band monitoring** — if the tenant's own logs are disabled, you still have:
+//    - Defender XDR `CloudAppEvents`
+//    - Microsoft Graph activity logs
+//    - Cross-correlate with Microsoft Defender for Cloud Apps alerts
+//
+// ## References
+//
+// - [MITRE ATT&CK T1562.008 — Disable Cloud Logs](https://attack.mitre.org/techniques/T1562/008/)
+// - [Microsoft Learn: Set-AdminAuditLogConfig](https://learn.microsoft.com/powershell/module/exchange/set-adminauditlogconfig)
+// - [Microsoft Learn: Enable mailbox auditing](https://learn.microsoft.com/purview/audit-mailboxes)
+// - [Microsoft Purview Audit (Premium) — retention and immutability](https://learn.microsoft.com/purview/audit-premium)
+
+OfficeActivity
+| where OfficeWorkload =~ "Exchange"
+| where UserType in~ ("Admin","DcAdmin")
+// Only admin or global-admin can disable audit logging
+| where Operation =~ "Set-AdminAuditLogConfig"
+| extend AdminAuditLogEnabledValue = tostring(parse_json(tostring(parse_json(tostring(array_slice(parse_json(Parameters),3,3)))[0])).Value)
+| where AdminAuditLogEnabledValue =~ "False"
+| summarize StartTimeUtc = min(TimeGenerated), EndTimeUtc = max(TimeGenerated), OperationCount = count() by Operation, UserType, UserId, ClientIP, ResultStatus, Parameters, AdminAuditLogEnabledValue
+| extend AccountName = iff(UserId contains '@', tostring(split(UserId, '@')[0]), UserId)
+| extend AccountUPNSuffix = iff(UserId contains '@', tostring(split(UserId, '@')[1]), '')

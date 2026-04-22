@@ -1,0 +1,109 @@
+// Name: Successful Sign-In From Country Not Seen Before
+// Description: Flags successful Entra ID sign-ins from countries not observed in the
+//              tenant within the prior 90 days (Sentinel) / 30 days (Advanced Hunting).
+//              Tenant-wide baseline, complementary to per-user impossible-travel hunts.
+// MITRE ATT&CK: T1078.004 (Valid Accounts: Cloud Accounts),
+//               T1535 (Unused/Unsupported Cloud Regions — adjacent concept)
+// Data Source: SigninLogs (Entra ID)  /  AADSignInEventsBeta (Advanced Hunting)
+// Platform:    Microsoft Sentinel / Log Analytics  (also Advanced Hunting)
+// Time window: 90-day baseline, last 3 days detection window
+// Reference:   ./Signin-From-New-Country.md
+// Context:     Most organizations operate in a handful of countries. A new-country
+//              sign-in is a tenant-level anomaly that's cheap to compute and a strong
+//              prior for further investigation. Doesn't replace impossible-travel but
+//              catches the case where an attacker uses a new geography across many
+//              user accounts (e.g., a password-spray campaign from a new region).
+//
+// Recommended actions on hits:
+// - Check if the country appears for one user or many (concentrated vs spread)
+// - For a single user: cross-reference their travel / VPN history
+// - For multiple users in one new country: assume campaign; pivot on IP / UserAgent
+// - Block anonymous / sanctioned geographies via Named Locations in Conditional Access
+//
+// ---------------------------------------------------------------------------
+// Extended context, background, tuning, and attribution
+// ---------------------------------------------------------------------------
+//
+// # Successful Sign-In From Country Not Seen Before
+//
+// <sub>[← Back to KQL index](../README.md)</sub>
+//
+// ## Why this hunt
+//
+// Most organizations, even globally distributed ones, have a predictable footprint of countries their users sign in from. A brand-new country appearing in Entra sign-in logs is a tenant-level anomaly that's:
+//
+// - Cheap to compute (a single `distinct Location` baseline)
+// - Low volume (true new countries are rare)
+// - Strong prior for investigation
+//
+// This complements per-user impossible-travel hunts ([Impossible-Travel-Multi-Country](./Impossible-Travel-Multi-Country.md)) because it catches a different attack shape: **a new geography being used across one or many users**, typically because an attacker is running a campaign from new infrastructure.
+//
+// ## Expected output
+//
+// | Column | Meaning |
+// |---|---|
+// | `TimeGenerated` | When |
+// | `Location` | The new country |
+// | `UserAgent` | Browser / client string |
+// | `UserPrincipalName` | Who signed in |
+// | `IPAddress` | Source IP |
+//
+// ### Triage patterns
+//
+// **Single user, one new country:**
+// - Likely legitimate travel. Confirm out-of-band.
+// - If unexplained: pivot to same-user sign-in history and MFA details. Check for session-revocation need.
+//
+// **Many users, one new country in short window:**
+// - Almost certainly a password-spray or AiTM campaign from a new hosting provider.
+// - Pivot to IP ranges and user agents — attacker tooling often has a distinctive UA.
+// - Consider temporary geo-block via Named Location + Conditional Access.
+//
+// **One user, multiple new countries in short window:**
+// - Token theft / session hijack. See `Impossible-Travel-Multi-Country`.
+//
+// ### Red flags
+//
+// - Country is a known adversary-source geo for your sector (threat-intel dependent)
+// - Country appears alongside a risky `RiskLevelDuringSignIn`
+// - User agent is a headless browser signature (Python `requests`, `curl`, `node-fetch`)
+// - IP maps to a VPS / VPN / hosting provider, not an ISP
+//
+// ## Tuning notes
+//
+// - **Baseline length:** 90 days covers most legitimate global travel patterns. Shorten to 30 days for newer tenants with less history.
+// - **Detection window:** `ago(3d)` is a wide backfill; run as a scheduled query on a narrow window for alerting (e.g., `TimeGenerated > ago(1h)`).
+// - **Country codes:** `Location` in SigninLogs is usually ISO country. Strip `""` and `null` explicitly — some ISPs return empty.
+// - **Authenticated vs failed:** filters to `ResultType == 0` (success). Include failed sign-ins if you want to see password-spray attempts that didn't succeed.
+// - **Named Locations allow-list:** exclude your corp egress ranges from the baseline to avoid a VPN provider region appearing as "known" and masking real new ones.
+//
+// ## Recommended hardening
+//
+// 1. **Named Locations** in Conditional Access — define your business-relevant countries, block sign-ins from sanctioned / high-risk regions at the policy layer.
+// 2. **GPS-based CA** (mobile app) for travel-heavy privileged users — stronger than IP geo.
+// 3. **Risk-based CA** — `atRisk` + new country = require re-MFA + compliant device.
+// 4. **Continuous Access Evaluation** — closer to real-time session revocation when risk appears.
+// 5. **Tenant-wide geo-fencing policy** — some orgs adopt a "sign in from the 20 countries we operate in, or request an exception". Enforced via CA Named Location.
+//
+// ## References
+//
+// - [Named Locations in Conditional Access](https://learn.microsoft.com/en-us/entra/identity/conditional-access/concept-condition-filters-for-devices)
+// - [Entra ID Protection: Anomalous sign-in detections](https://learn.microsoft.com/en-us/entra/id-protection/concept-identity-protection-risks)
+// - [MITRE ATT&CK T1078.004 — Cloud Accounts](https://attack.mitre.org/techniques/T1078/004/)
+//
+// ## Source & attribution
+//
+// > Source: [Bert-JanP/Hunting-Queries-Detection-Rules — Azure Active Directory/SuccessfulSignInFromNewCountry.md](https://github.com/Bert-JanP/Hunting-Queries-Detection-Rules/blob/main/Azure%20Active%20Directory/SuccessfulSignInFromNewCountry.md) · BSD-3-Clause License
+
+let KnownCountries = SigninLogs
+    | where TimeGenerated > ago(90d) and TimeGenerated < ago(3d)
+    // Only successful logins for the baseline
+    | where ResultType == 0
+    | where isnotempty(Location)
+    | distinct Location;
+SigninLogs
+| where TimeGenerated > ago(3d)
+| where ResultType == 0
+| where isnotempty(Location)
+| where Location !in (KnownCountries)
+| project TimeGenerated, Location, UserAgent, ResultType, Identity, UserPrincipalName, IPAddress

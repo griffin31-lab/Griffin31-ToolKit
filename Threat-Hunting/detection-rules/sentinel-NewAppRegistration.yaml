@@ -1,0 +1,48 @@
+id: 3c82b15d-7f49-4a68-8c13-9e2d6b0a4f57
+name: New Entra Application Registration
+description: |
+  Flags creation of new Entra application registrations. New app registrations are
+  a staging step for consent-phishing, service-principal abuse, and long-term
+  persistence. This rule is intentionally high-volume; tune via an allow-list of
+  known DevOps/automation users who legitimately register apps.
+severity: Medium
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AuditLogs
+queryFrequency: 1h
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - Persistence
+  - DefenseEvasion
+relevantTechniques:
+  - T1098.001
+  - T1550.001
+query: |
+  AuditLogs
+  | where TimeGenerated > ago(1h)
+  | where OperationName == "Add application"
+  | extend AppName = tostring(TargetResources[0].displayName)
+  | extend AppId = tostring(TargetResources[0].id)
+  | extend InitiatedByUser = tostring(parse_json(tostring(InitiatedBy.user)).userPrincipalName)
+  | extend InitiatedByIP = tostring(parse_json(tostring(InitiatedBy.user)).ipAddress)
+  | project TimeGenerated, AppName, AppId, InitiatedByUser, InitiatedByIP, Result, CorrelationId
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: InitiatedByUser
+  - entityType: CloudApplication
+    fieldMappings:
+      - identifier: AppId
+        columnName: AppId
+      - identifier: Name
+        columnName: AppName
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: InitiatedByIP
+version: 1.0.0
+kind: Scheduled

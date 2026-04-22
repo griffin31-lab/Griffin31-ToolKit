@@ -1,0 +1,99 @@
+// Name: PowerShell Encoded / Obfuscated Command
+// Description: Decodes and surfaces Base64-encoded PowerShell command lines, a near-
+//              universal signature of offensive tooling (Cobalt Strike, Empire, Sliver,
+//              Mimikatz one-liners, commodity malware droppers). Decoding in-query lets
+//              an analyst read the actual cleartext command.
+// MITRE ATT&CK: T1027 (Obfuscated Files or Information),
+//               T1027.010 (Obfuscated Files or Information: Command Obfuscation),
+//               T1059.001 (Command and Scripting Interpreter: PowerShell)
+// Data Source: DeviceProcessEvents (Microsoft Defender for Endpoint)
+// Platform:    Microsoft Defender XDR / Microsoft Sentinel
+// Time window: 48 hours
+// Reference:   ./PowerShell-Encoded-Command.md
+// Context:     Attackers use -EncodedCommand to move payloads past command-line logging
+//              filters and to embed complex scripts in a single line. Legitimate sysadmin
+//              use exists but is rare and should be sourced from known automation.
+//
+// Recommended actions on hits:
+// - Read the DecodedCommandLine column — this is the attacker's actual script
+// - If it contains Invoke-Expression, DownloadString, IEX, FromBase64String, or HTTP URLs, treat as live intrusion
+// - Isolate the device and preserve volatile memory if possible
+// - Pivot on DeviceName to find follow-on execution
+//
+// ---------------------------------------------------------------------------
+// Extended context, background, tuning, and attribution
+// ---------------------------------------------------------------------------
+//
+// # PowerShell Encoded / Obfuscated Command
+//
+// <sub>[← Back to KQL index](../README.md)</sub>
+//
+// ## Why this hunt
+//
+// PowerShell `-EncodedCommand` is the single most common obfuscation primitive on Windows intrusion. It exists for a legitimate reason (escaping complex command lines through layers of quoting) but is used overwhelmingly by:
+//
+// - Cobalt Strike / Empire / Sliver initial-access beacons
+// - Commodity malware droppers (`IEX (New-Object Net.WebClient).DownloadString(...)`)
+// - Fileless persistence (a short encoded blob in a scheduled task is enough)
+// - Offensive tooling that wants to bypass basic command-line logging or signature match
+//
+// The defender's leverage: **KQL can decode the Base64 in-query**. The analyst sees the actual cleartext command in the `DecodedCommandLine` column and can triage immediately instead of copy-pasting into CyberChef.
+//
+// ## Expected output
+//
+// | Column | Meaning |
+// |---|---|
+// | `ProcessCommandLine` | The raw encoded command as seen on the endpoint |
+// | `DecodedCommandLine` | **The key field** — the attacker's actual PowerShell code, Base64-decoded and with null bytes stripped |
+// | `InitiatingProcessFileName` | Parent — may reveal the delivery vector (office app, browser, rundll32, etc.) |
+//
+// Look for these red-flag substrings in `DecodedCommandLine`:
+// - `Invoke-Expression`, `IEX`
+// - `DownloadString`, `DownloadFile`, `WebClient`, `Invoke-WebRequest`
+// - `FromBase64String` (nested layers of encoding)
+// - HTTP / HTTPS URLs pointing to raw.githubusercontent.com, pastebin, cdn domains
+// - `-NoProfile -NonInteractive -WindowStyle Hidden` combinations
+// - `Bypass` (execution policy)
+// - `System.Reflection.Assembly`, `System.Net.Sockets`, `.NET` loading tricks
+//
+// ## Tuning notes
+//
+// - **Legitimate encoded commands exist** — vendor installers, configuration management tools (DSC, Ansible-on-Windows), some internal scripts. Baseline the `InitiatingProcessFileName` for your known automation and allow-list.
+// - The regex `\s+([A-Za-z0-9+/]{20}\S+$)` captures the Base64 blob after a space. Some attackers use `-e` (single-letter) or write the blob split across multiple args — consider extending the extract pattern if you see mismatches.
+// - For scheduled analytics, trim to `ago(1h)` and alert on decoded commands containing any red-flag substring above.
+//
+// ## Recommended hardening
+//
+// 1. **Enable PowerShell Script Block Logging** (Event ID 4104) — captures the deobfuscated script text Windows compiles, which is harder for attackers to evade than command-line logging
+// 2. **Enable Module Logging** and **Transcription** for high-risk hosts
+// 3. **Constrained Language Mode** via Device Guard / WDAC — kills most PowerShell offensive tooling stone dead on hosts that don't need full language mode
+// 4. **AMSI** (Antimalware Scan Interface) is on by default — ensure it is not disabled; attackers frequently attempt AMSI bypasses
+// 5. **WDAC policy** restricting PowerShell execution to signed scripts on privileged-tier hosts
+// 6. **Remove PowerShell v2** where still installed — it ignores script block logging
+// 7. **Don't give end users local admin** — encoded-command attacks depend on being able to run arbitrary PowerShell
+//
+// ## Source & attribution
+//
+// Query adapted from **Bert-JanP/Hunting-Queries-Detection-Rules** — `Defender For Endpoint/PowerShellEncodedCommandsExecuted.md` (MIT). Tagged with MITRE T1027.010 sub-technique per the related `ttp_t1027-010_powershellEncodedCommand.md` from the same source.
+//
+// ## References
+//
+// - [MITRE ATT&CK T1027.010 — Command Obfuscation](https://attack.mitre.org/techniques/T1027/010/)
+// - [MITRE ATT&CK T1059.001 — PowerShell](https://attack.mitre.org/techniques/T1059/001/)
+// - [Microsoft Learn: PowerShell script block logging](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_logging_windows)
+// - [Microsoft Learn: Constrained Language Mode](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_language_modes)
+
+let EncodedList = dynamic(['-encodedcommand', '-enc', '-EncodedCommand', '-Enc']);
+let TimeFrame = 48h;
+DeviceProcessEvents
+| where Timestamp > ago(TimeFrame)
+| where ProcessCommandLine contains "powershell" or InitiatingProcessCommandLine contains "powershell"
+| where ProcessCommandLine has_any (EncodedList) or InitiatingProcessCommandLine has_any (EncodedList)
+| extend Base64Blob     = extract(@'\s+([A-Za-z0-9+/]{20}\S+$)', 1, ProcessCommandLine)
+| extend Decoded        = base64_decode_tostring(Base64Blob)
+| extend DecodedCommandLine = replace_string(Decoded, '\u0000', '')
+| where isnotempty(Base64Blob) and isnotempty(DecodedCommandLine)
+| project Timestamp, DeviceName, AccountUpn,
+          FileName, ProcessCommandLine, DecodedCommandLine,
+          InitiatingProcessFileName, InitiatingProcessCommandLine
+| sort by Timestamp desc

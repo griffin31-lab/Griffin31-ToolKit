@@ -2,32 +2,27 @@
 
 <sub>[← Back to Threat-Hunting](../) · [← Back to Griffin31 ToolKit](../../)</sub>
 
-Atomic indicators — OAuth app IDs, file hashes, domains, IPs, URLs — tied to documented incidents or active campaigns.
-
-## Structure (planned)
-
-```
-iocs/
-├── oauth-apps/       Malicious OAuth App IDs (Entra, Google Workspace)
-├── hashes/           SHA-256 file hashes (Defender XDR searchable)
-├── domains/          C2 / phishing / exfil domains
-├── ips/              C2 / scanner / exfil IPs
-└── urls/             Full malicious URLs
-```
-
-Each indicator file carries:
-- `source` — where it came from (vendor disclosure, public report, internal detection)
-- `published` — date the indicator was first published
-- `threat_actor` — attribution if known (e.g., Storm-2477 / Lumma Stealer)
-- `confidence` — High / Medium / Low
-- `expires` — when to stop acting on the indicator (many IoCs are ephemeral)
+Atomic and pattern-based indicators tied to documented incidents, published advisories, or tracked campaigns. Each file below is a standalone category listing with full source attribution inline.
 
 ## Index
 
-_Empty — indicators will be added as new incidents are documented._
+| File | Coverage | Lead source |
+|---|---|---|
+| [oauth-apps.md](./oauth-apps.md) | Malicious OAuth application IDs (Entra + Google) — 5 entries | Microsoft Security Blog, Push Security, Mitiga, Proofpoint, Darktrace |
+| [infostealer-c2.md](./infostealer-c2.md) | Infostealer C2 domains, URL paths, protocol signatures — 7 entries | CISA AA25-141B, Microsoft, Trend Micro, abuse.ch ThreatFox |
+| [phishing-infra.md](./phishing-infra.md) | Phishing kit infrastructure patterns — 4 entries | LevelBlue, Deepwatch, Abnormal AI, Proofpoint |
+| [threat-actor-ips.md](./threat-actor-ips.md) | State-sponsored / criminal IP infrastructure — 5 CISA advisories | CISA AA25-239A / AA25-203A / AA25-141B / AA23-320A / AA23-144A |
+| [file-hashes.md](./file-hashes.md) | SHA-256 hashes of documented malware samples — 4 entries | Picus, Point Wild, Cyble |
+
+## Cross-cutting usage
+
+- **Sentinel** — most categories import cleanly as Watchlists. Sample KQL joins are in each file.
+- **Defender XDR** — paste atomic values into Settings → Endpoints → Indicators (by type).
+- **Firewall / DNS filter** — prefer `threat-actor-ips.md` and `infostealer-c2.md`. Expire aggressively (30-90 days max) — infostealer C2 rotates weekly.
+- **MISP / OpenCTI / STIX feeds** — CISA and abuse.ch both publish machine-readable feeds; each file links to the canonical feed.
 
 ## Notes
 
-- IoCs here are published as plain text for copy/paste into SIEM watchlists, Defender XDR indicators, and firewall deny-lists.
-- Always confirm an indicator is still active before acting on it.
-- Many infostealer C2 domains rotate weekly — prefer TTP-based hunts over IoC blocks.
+- **Every indicator has a source URL and first-publish date.** Griffin31 does not fabricate, guess, or speculate.
+- **Expiry matters.** Infostealer C2s rotate weekly. State-actor IPs are revoked by CISA on a rolling basis. Re-verify at the source before acting.
+- **Prefer TTP-based hunts** when the indicator lifespan is short. Atomic IoCs in this library are best for *retrospective* detection — "was I ever touched by this?" — not for long-term block lists.

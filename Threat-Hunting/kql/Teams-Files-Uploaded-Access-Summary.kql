@@ -1,0 +1,105 @@
+// Name: Teams Files Uploaded — Access Summary (anomalous sharing detection)
+// Description: Identifies files uploaded to SharePoint via a Teams chat and summarizes
+//              the users and IPs that subsequently accessed each file. Surfaces
+//              anomalous file-sharing patterns — files touched by many more users
+//              than expected, or by external / unusual identities.
+// MITRE ATT&CK: T1199 (Trusted Relationship),
+//               T1102 (Web Service),
+//               T1078 (Valid Accounts)
+// Data Source: OfficeActivity (SharePoint workload)
+// Platform:    Microsoft Sentinel / Log Analytics
+// Time window: default workspace range (typically 24h-7d)
+// Reference:   ./Teams-Files-Uploaded-Access-Summary.md
+// Context:     Teams chat files are stored in the uploader's OneDrive under
+//              "Microsoft Teams Chat Files". A document shared to one person via
+//              Teams 1:1 chat and subsequently accessed by 20 people is a strong
+//              signal of secondary-sharing or abuse.
+//
+// Recommended actions on hits:
+// - Investigate entries where NumberOfUsersAccessed is high for a 1:1 chat file
+// - Cross-reference the file path with Sensitivity Labels / DLP hits
+// - Review the accessing IPs — any from unusual geos or ASNs?
+// - If external users are in the access list, confirm each was intended
+//
+// ---------------------------------------------------------------------------
+// Extended context, background, tuning, and attribution
+// ---------------------------------------------------------------------------
+//
+// # Teams Files Uploaded — Access Summary
+//
+// <sub>[← Back to KQL index](../README.md)</sub>
+//
+// > Source: [Azure-Sentinel / Solutions/Microsoft 365/Hunting Queries/TeamsFilesUploaded.yaml](https://github.com/Azure/Azure-Sentinel/blob/master/Solutions/Microsoft%20365/Hunting%20Queries/TeamsFilesUploaded.yaml) · MIT License
+//
+// ## Why this hunt
+//
+// Microsoft Teams chat files — pasted attachments, drag-and-drops, screenshots — are stored as regular SharePoint / OneDrive items under `Microsoft Teams Chat Files`. Because they live there, they are **subject to SharePoint sharing semantics** but are often treated by users as ephemeral chat messages.
+//
+// This gap creates two common incident patterns:
+//
+// 1. **Oversharing of sensitive files** — a user drops a file in a 1:1 Teams chat, the file is technically shareable with the whole chat history (including later members), and it eventually reaches more people than the uploader intended
+// 2. **Post-compromise collection** — attackers search a compromised user's OneDrive for the `Microsoft Teams Chat Files` folder because it frequently contains credentials, screenshots, or internal docs the user would not put in "real" SharePoint
+//
+// The join pivots each upload to the downstream read / download events, producing a per-file summary of who accessed it.
+//
+// ## Expected output
+//
+// | Column | What it tells you |
+// |---|---|
+// | `UserId` | The person who uploaded the file into a Teams chat |
+// | `FileName` | Friendly name of the file (may contain sensitive keywords) |
+// | `FileLocation` | Full `OfficeObjectId` path inside OneDrive |
+// | `AccessedBy` | Bag of (accessing UserId → ClientIP) — who actually read the file |
+// | `NumberOfUsersAccessed` | Cardinality of the access set |
+//
+// High-signal hits:
+//
+// - File uploaded to a 1:1 chat (uploader + 1 recipient) but `NumberOfUsersAccessed` > 2
+// - File name contains "password", "secret", "creds", ".env", "key", "token", "kdbx", ".pem"
+// - `AccessedBy` contains external (#EXT#) identities the uploader did not invite
+//
+// Expected / benign:
+//
+// - Files shared in a large Team channel where many members legitimately download
+//
+// ## Tuning notes
+//
+// - **Filename keyword list** — extend the query with a `| where FileName has_any(...)` clause containing your sensitivity keywords
+// - **Scope to sensitive users** — join against a watchlist of CxO / Finance / IT / R&D users to focus on their Teams uploads
+// - **Label enrichment** — if Purview `MicrosoftPurviewInformationProtection` is available, join on `OfficeObjectId` to show which labels were on the file
+// - **External-access cut** — `| mv-expand bag_keys(bag_userBag) | where bag_keys_ contains "#EXT#"` isolates files that external identities opened
+// - **Time window** — add an explicit `| where TimeGenerated > ago(7d)` for initial hunt; remove for the full workspace window
+//
+// ## Recommended hardening
+//
+// 1. **Teams external file sharing settings** — in Teams admin center, restrict file upload from external users on sensitive teams
+// 2. **DLP policies covering Teams chat** — Microsoft Purview DLP has a Teams workload; policies can block or alert on sensitive content in 1:1 / group chat
+// 3. **Sensitivity labels default** — apply automatic labels to OneDrive content based on keyword / regex patterns; labels carry into shared Teams files
+// 4. **Retention policies for Teams chat files** — set the OneDrive retention policy for the `Microsoft Teams Chat Files` folder to auto-delete after N days
+// 5. **Educate on "Teams ≠ private"** — organizational awareness that Teams files are SharePoint-grade artifacts
+// 6. **Conditional Access for unmanaged devices** — browser-only Teams access for non-compliant devices prevents local download of chat files
+//
+// ## References
+//
+// - [MITRE ATT&CK T1199 — Trusted Relationship](https://attack.mitre.org/techniques/T1199/)
+// - [MITRE ATT&CK T1102 — Web Service](https://attack.mitre.org/techniques/T1102/)
+// - [Microsoft Learn: Teams file sharing and storage](https://learn.microsoft.com/microsoftteams/sharepoint-onedrive-interact)
+// - [Microsoft Purview DLP for Teams](https://learn.microsoft.com/purview/dlp-microsoft-teams)
+
+OfficeActivity
+| where RecordType =~ "SharePointFileOperation"
+| where Operation =~ "FileUploaded"
+| where UserId != "app@sharepoint"
+| where SourceRelativeUrl has "Microsoft Teams Chat Files"
+| join kind= leftouter (
+    OfficeActivity
+    | where RecordType =~ "SharePointFileOperation"
+    | where Operation =~ "FileDownloaded" or Operation =~ "FileAccessed"
+    | where UserId != "app@sharepoint"
+    | where SourceRelativeUrl has "Microsoft Teams Chat Files"
+  ) on OfficeObjectId
+| extend userBag = bag_pack(UserId1, ClientIP1)
+| summarize make_set(UserId1, 10000), make_bag(userBag, 10000) by TimeGenerated, UserId, OfficeObjectId, SourceFileName
+| extend NumberUsers = array_length(bag_keys(bag_userBag))
+| project timestamp=TimeGenerated, UserId, FileLocation=OfficeObjectId, FileName=SourceFileName, AccessedBy=bag_userBag, NumberOfUsersAccessed=NumberUsers
+| extend AccountName = tostring(split(UserId, "@")[0]), AccountUPNSuffix = tostring(split(UserId, "@")[1])

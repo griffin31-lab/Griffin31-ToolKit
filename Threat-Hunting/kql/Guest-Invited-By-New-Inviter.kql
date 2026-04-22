@@ -1,0 +1,108 @@
+// Name: Guest User Invited by New Inviter (first-time inviter)
+// Description: Surfaces guest-user invitations sent by an account that has not
+//              invited any guest in the preceding 14 days. Rare-event anomaly that
+//              exposes insiders / compromised users using guest invites as a
+//              lateral-access persistence path.
+// MITRE ATT&CK: T1078.004 (Valid Accounts: Cloud Accounts),
+//               T1136.003 (Create Account: Cloud Account)
+// Data Source: AuditLogs (Entra ID UserManagement category)
+// Platform:    Microsoft Sentinel / Log Analytics
+// Time window: 14-day baseline, 1-day hit window
+// Reference:   ./Guest-Invited-By-New-Inviter.md
+// Context:     Guest invitations are normally concentrated in HR / office-manager /
+//              onboarding-admin accounts. A developer or finance user suddenly
+//              issuing their first guest invite may be inviting an attacker-
+//              controlled external identity for lateral access.
+//
+// Recommended actions on hits:
+// - Confirm the Initiator is authorized to invite guests
+// - Check TargetUserPrincipalName — is the external domain reputable / expected?
+// - Review the invited guest's subsequent activity (first sign-in, resources accessed)
+// - If unauthorized, revoke the invitation and remove the guest account
+//
+// ---------------------------------------------------------------------------
+// Extended context, background, tuning, and attribution
+// ---------------------------------------------------------------------------
+//
+// # Guest User Invited by New Inviter
+//
+// <sub>[← Back to KQL index](../README.md)</sub>
+//
+// > Source: [Azure-Sentinel / Detections/AuditLogs/GuestUsersInvitedtoTenantbyNewInviters.yaml](https://github.com/Azure/Azure-Sentinel/blob/master/Detections/AuditLogs/GuestUsersInvitedtoTenantbyNewInviters.yaml) · MIT License · Microsoft AADSecOpsGuide
+//
+// ## Why this hunt
+//
+// In a healthy tenant, guest invitations are **statistically concentrated** — a small set of HR, office-manager, and project-lead accounts issue most of the invites. The same people do it repeatedly, every month.
+//
+// An account that has never invited a guest in the preceding 14 days suddenly issuing an invite is statistically rare and therefore high-signal. Two common malicious scenarios:
+//
+// 1. **Compromised internal user** — attacker riding the session of a developer or finance user invites an attacker-controlled external mailbox as a guest, then grants that guest access to SharePoint / Teams resources
+// 2. **Insider threat persistence** — departing employee invites their personal Gmail as a guest before resignation, retains access to internal SharePoint sites
+//
+// Because the pivot is on the **inviter**, not the target, this hunt catches the scenario even when the invited domain looks ordinary.
+//
+// ## Expected output
+//
+// | Column | What it tells you |
+// |---|---|
+// | `TimeGenerated` | When the invite was issued |
+// | `InitiatingUserPrincipalName` | The new inviter — first time in 14 days |
+// | `InitiatingIPAddress` | Source IP — correlate to the user's baseline |
+// | `TargetUserPrincipalName` | Email / UPN of the invited guest |
+//
+// Expected (benign) hits:
+//
+// - A newly-hired manager who just gained permission to invite
+// - An employee running their first customer-onboarding project
+//
+// Suspicious hits:
+//
+// - `InitiatingUserPrincipalName` belongs to a role (dev, finance) that normally doesn't do onboarding
+// - Invited domain is personal webmail or lookalike
+// - Invite happens at unusual hours or from unusual geography for the inviter
+// - Invite is followed shortly by the guest being added to a privileged group
+//
+// ## Tuning notes
+//
+// - **Baseline window** — 14 days default. Short for noisy tenants; longer (30d) for quieter environments
+// - **Exclude HR / IT sponsor accounts** — list those UPNs in an explicit exclusion to cut out the normal onboarding flow
+// - **Enrich with target-domain reputation** — join to threat-intel for the target domain (if the TI source is available)
+// - **Pair with follow-up actions** — extend the rule to flag if the same inviter adds the new guest to any group / role within 24h
+//
+// ## Recommended hardening
+//
+// 1. **Restrict who can invite guests** — Entra admin > External collaboration settings > "Guest invite settings" = "Only users with admin roles can invite" or "Specific admins can invite"
+// 2. **Guest invitation approval workflow** — use Entitlement Management (Entra ID P2) for a reviewed onboarding gate
+// 3. **Entra Access Reviews** on every guest, quarterly — auto-remove any guest with no sign-in in 90 days
+// 4. **Conditional Access for guests** — require MFA + compliant device on the **guest side** (their Entra session)
+// 5. **Cross-tenant access settings** — restrict which external tenants can be invited to, and what resources they can use
+// 6. **Sensitivity labels with encryption** — Confidential labels should block guest access regardless of SharePoint sharing permissions
+// 7. **Monitor guest role assignments** — alert on any guest added to Directory roles, privileged groups, or Application Administrator
+//
+// ## References
+//
+// - [MITRE ATT&CK T1078.004](https://attack.mitre.org/techniques/T1078/004/)
+// - [Microsoft Learn: External identities — restrict invitations](https://learn.microsoft.com/entra/external-id/external-collaboration-settings-configure)
+// - [Microsoft AADSecOpsGuide — user account monitoring](https://learn.microsoft.com/entra/architecture/security-operations-user-accounts)
+
+let inviting_users = (AuditLogs
+  | where TimeGenerated between(ago(14d)..ago(1d))
+  | where OperationName =~ "Invite external user"
+  | where Result =~ "success"
+  | extend InitiatingUserPrincipalName = tostring(parse_json(tostring(InitiatedBy.user)).userPrincipalName)
+  | where isnotempty(InitiatingUserPrincipalName)
+  | summarize by InitiatingUserPrincipalName);
+AuditLogs
+| where TimeGenerated > ago(1d)
+| where OperationName =~ "Invite external user"
+| where Result =~ "success"
+| extend InitiatingUserPrincipalName = tostring(parse_json(tostring(InitiatedBy.user)).userPrincipalName)
+| extend InitiatingAadUserId = tostring(InitiatedBy.user.id)
+| extend InitiatingIPAddress = tostring(InitiatedBy.user.ipAddress)
+| where isnotempty(InitiatingUserPrincipalName) and InitiatingUserPrincipalName !in (inviting_users)
+| extend TargetUserPrincipalName = tostring(TargetResources[0].userPrincipalName)
+| extend TargetAadUserId = tostring(TargetResources[0].id)
+| extend invitingUser = InitiatingUserPrincipalName, invitedUserPrincipalName = TargetUserPrincipalName
+| extend InitiatingAccountName = tostring(split(InitiatingUserPrincipalName, "@")[0]), InitiatingAccountUPNSuffix = tostring(split(InitiatingUserPrincipalName, "@")[1])
+| extend TargetAccountName = tostring(split(TargetUserPrincipalName, "@")[0]), TargetAccountUPNSuffix = tostring(split(TargetUserPrincipalName, "@")[1])
+| project-reorder TimeGenerated, OperationName, Result, TargetUserPrincipalName, TargetAadUserId, InitiatingUserPrincipalName, InitiatingAadUserId, InitiatingIPAddress

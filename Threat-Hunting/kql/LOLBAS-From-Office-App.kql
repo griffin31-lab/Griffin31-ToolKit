@@ -1,0 +1,102 @@
+// Name: LOLBAS Spawned by Office Application
+// Description: Detects rundll32.exe, regsvr32.exe, or mshta.exe launched as a child
+//              process of Word, Excel, PowerPoint, Outlook, or OneNote. Legitimate
+//              Office workflows almost never do this — it is the signature of a
+//              weaponized document delivering initial access.
+// MITRE ATT&CK: T1218.010 (System Binary Proxy Execution: Regsvr32),
+//               T1218.011 (System Binary Proxy Execution: Rundll32),
+//               T1218.005 (System Binary Proxy Execution: Mshta),
+//               T1566.001 (Phishing: Spearphishing Attachment)
+// Data Source: DeviceProcessEvents (Microsoft Defender for Endpoint)
+// Platform:    Microsoft Defender XDR / Microsoft Sentinel
+// Time window: 7 days
+// Reference:   ./LOLBAS-From-Office-App.md
+// Context:     Classic initial-access chain: user opens a weaponized .docx / .xlsm /
+//              .one attachment, the embedded macro or exploit spawns a signed Microsoft
+//              binary (rundll32 / regsvr32 / mshta) which downloads and executes the
+//              next stage. Using signed binaries evades basic AV signatures.
+//
+// Recommended actions on hits:
+// - Isolate the device in MDE
+// - Pull the originating email from Threat Explorer — same attachment likely hit others
+// - Block the sender domain and quarantine any remaining copies
+// - Check ProcessCommandLine for the URL / payload path the LOLBin fetched
+// - Review downstream process tree for follow-on execution (powershell, cmd, a child rundll32)
+//
+// ---------------------------------------------------------------------------
+// Extended context, background, tuning, and attribution
+// ---------------------------------------------------------------------------
+//
+// # LOLBAS Spawned by Office Application
+//
+// <sub>[← Back to KQL index](../README.md)</sub>
+//
+// ## Why this hunt
+//
+// This is the single most productive initial-access detection for phishing-driven intrusion. The chain is:
+//
+// 1. User receives a lure attachment — `.docx`, `.xlsm`, `.one`, `.pub`
+// 2. Document contains a macro, template injection, DDE link, or exploits a vuln (Follina / CVE-2022-30190, CVE-2023-36884)
+// 3. The Office application spawns a **signed Microsoft binary** to download and execute the next stage:
+//    - `regsvr32.exe` loading a remote `.sct` or `.dll`
+//    - `rundll32.exe` with a URL as an argument
+//    - `mshta.exe` fetching a remote `.hta`
+//    - `wscript.exe` / `cscript.exe` running a `.vbs` dropped to `%TEMP%`
+// 4. These are "Living Off The Land Binaries And Scripts" (LOLBAS) — they are signed by Microsoft, present on every Windows host, and frequently excluded from AV scanning
+//
+// Legitimate Office workflows essentially never spawn these binaries. Every hit deserves a look.
+//
+// ## Expected output
+//
+// | Column | What to look at |
+// |---|---|
+// | `FileName` | One of: `rundll32.exe`, `regsvr32.exe`, `mshta.exe`, `wscript.exe`, `cscript.exe` |
+// | `InitiatingProcessFileName` | The Office app that spawned it |
+// | `ProcessCommandLine` | **The key field** — contains the URL or payload path. `http://`, `https://`, an `.sct` / `.hta` / `.dll` reference is textbook malicious |
+// | `AccountUpn` | The user who was phished |
+//
+// Typical false positives: internal LOB tools that embed Office automation and legitimately call rundll32 — add these to an allow-list at the top of the query once you've identified them.
+//
+// ## Tuning notes
+//
+// - Tenants running Office add-ins from SaaS vendors may see occasional rundll32 spawns from legitimate add-in installers — review `ProcessCommandLine` to confirm
+// - `mspub.exe` (Publisher) is included because Emotet historically favored it as a less-defended Office app
+// - Extend `LOLBins` with `certutil.exe`, `bitsadmin.exe`, `msiexec.exe` if you want broader coverage — expect more noise
+//
+// ## Recommended hardening
+//
+// 1. **Enable ASR rule** — *Block all Office applications from creating child processes* (`d4f940ab-401b-4efc-aadc-ad5f3c50688a`). This single rule stops the entire chain. Run audit first, review exclusions, flip to block.
+// 2. **Enable ASR rule** — *Block Office applications from creating executable content* (`3b576869-a4ec-4529-8536-b80a7769e899`)
+// 3. **Enable ASR rule** — *Block Win32 API calls from Office macros* (`92e97fa1-2edf-4476-bdd6-9dd0b4dddc7b`)
+// 4. **Disable macros from the internet** via Group Policy / Intune — ticked by default since Office 2022, verify
+// 5. **Block unsigned macros** in sensitive environments
+// 6. **Defender for Office 365 Safe Attachments** in dynamic-delivery mode
+// 7. **User training** is the weakest of these controls — prefer technical prevention
+//
+// ## Source & attribution
+//
+// Query synthesized from **Bert-JanP/Hunting-Queries-Detection-Rules**:
+// - `Defender For Endpoint/Regsvr32StartedByOfficeApplication.md` (MIT)
+// - `Defender For Endpoint/RareConnectionsMadeByOffice.md` (MIT)
+// - `Defender For Endpoint/MshtaExecutions.md` (MIT)
+//
+// Prior art: RedCanary threat detection reports on TA551 and regsvr32 abuse.
+//
+// ## References
+//
+// - [MITRE ATT&CK T1218.010 — Regsvr32](https://attack.mitre.org/techniques/T1218/010/)
+// - [MITRE ATT&CK T1218.011 — Rundll32](https://attack.mitre.org/techniques/T1218/011/)
+// - [MITRE ATT&CK T1218.005 — Mshta](https://attack.mitre.org/techniques/T1218/005/)
+// - [LOLBAS Project](https://lolbas-project.github.io/)
+// - [Microsoft Learn: ASR rules reference](https://learn.microsoft.com/en-us/defender-endpoint/attack-surface-reduction-rules-reference)
+
+let OfficeApplications = dynamic(['winword.exe', 'excel.exe', 'powerpnt.exe', 'outlook.exe', 'onenote.exe', 'mspub.exe', 'visio.exe']);
+let LOLBins                = dynamic(['rundll32.exe', 'regsvr32.exe', 'mshta.exe', 'wscript.exe', 'cscript.exe']);
+DeviceProcessEvents
+| where Timestamp > ago(7d)
+| where FileName in~ (LOLBins)
+| where InitiatingProcessFileName in~ (OfficeApplications)
+| project Timestamp, DeviceName, AccountUpn,
+          FileName, ProcessCommandLine,
+          InitiatingProcessFileName, InitiatingProcessCommandLine, InitiatingProcessFolderPath
+| sort by Timestamp desc

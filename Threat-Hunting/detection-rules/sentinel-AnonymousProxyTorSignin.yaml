@@ -1,0 +1,40 @@
+id: b6e49c3a-d527-4f81-a690-2c8b7e5d1f64
+name: Sign-in from Anonymous Proxy or Tor
+description: |
+  Fires when a user authenticates from an IP flagged by Entra risk detection as
+  an anonymous IP (Tor exit node, VPN, anonymizing proxy). This is a direct,
+  Entra-provided risk signal. Even when the user ultimately authenticates
+  successfully, the presence of an anonymous-IP flag is a high-quality signal
+  for credential theft or token replay.
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - SigninLogs
+      - AADRiskyUsers
+queryFrequency: 30m
+queryPeriod: 30m
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - InitialAccess
+  - DefenseEvasion
+relevantTechniques:
+  - T1090.003
+  - T1078.004
+query: |
+  SigninLogs
+  | where TimeGenerated > ago(30m)
+  | where RiskEventTypes has_any ("anonymizedIPAddress", "anonymousIPAddress") or RiskEventTypes_V2 has_any ("anonymizedIPAddress", "anonymousIPAddress")
+  | project TimeGenerated, UserPrincipalName, IPAddress, Location, AppDisplayName, ResultType, RiskState, RiskLevelDuringSignIn, RiskEventTypes, RiskEventTypes_V2, UserAgent
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: UserPrincipalName
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: IPAddress
+version: 1.0.0
+kind: Scheduled

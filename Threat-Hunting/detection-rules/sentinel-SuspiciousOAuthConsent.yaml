@@ -1,0 +1,51 @@
+id: 8f3a2c41-1b72-4d89-9e3f-1a6d0c4b7e12
+name: Suspicious OAuth Consent Granted to Third-Party App
+description: |
+  Detects consent-phishing activity in Entra ID. Fires when an end user grants
+  consent to an OAuth application that (a) is not allow-listed, (b) requests
+  high-privilege Microsoft Graph scopes (Mail.Read, Files.Read.All, Sites.FullControl.All,
+  User.ReadWrite.All), and (c) is not a known Microsoft first-party publisher.
+  Productionized from ../kql/oauth/Suspicious-OAuth-Consent.kql. Motivated by the
+  Vercel / Context.ai SaaS-supply-chain breach (April 2026).
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AuditLogs
+queryFrequency: 1h
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - InitialAccess
+  - CredentialAccess
+  - Persistence
+relevantTechniques:
+  - T1528
+  - T1550.001
+  - T1098.001
+query: |
+  let HighPrivScopes = dynamic(["Mail.Read", "Mail.ReadWrite", "Files.Read.All", "Files.ReadWrite.All", "Sites.FullControl.All", "User.ReadWrite.All", "Directory.Read.All", "Directory.ReadWrite.All", "full_access_as_app"]);
+  AuditLogs
+  | where TimeGenerated > ago(1h)
+  | where OperationName in ("Consent to application", "Add delegated permission grant", "Add app role assignment to service principal", "Add app role assignment grant to user")
+  | extend TargetResources = parse_json(TargetResources)
+  | extend AppName = tostring(TargetResources[0].displayName)
+  | extend AppId = tostring(TargetResources[0].id)
+  | extend ModifiedProps = tostring(TargetResources[0].modifiedProperties)
+  | extend InitiatedByUser = tostring(parse_json(tostring(InitiatedBy.user)).userPrincipalName)
+  | where ModifiedProps has_any (HighPrivScopes)
+  | project TimeGenerated, AppName, AppId, OperationName, InitiatedByUser, ModifiedProps, Result, CorrelationId
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: InitiatedByUser
+  - entityType: CloudApplication
+    fieldMappings:
+      - identifier: AppId
+        columnName: AppId
+      - identifier: Name
+        columnName: AppName
+version: 1.0.0
+kind: Scheduled

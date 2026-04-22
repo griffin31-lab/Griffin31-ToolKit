@@ -1,0 +1,104 @@
+// Name: Directory Role Assigned Outside PIM (permanent privileged assignment)
+// Description: Detects direct 'Add member to role' operations that bypass Privileged
+//              Identity Management. These assignments are permanent, standing
+//              privilege — the exact anti-pattern PIM is designed to eliminate.
+// MITRE ATT&CK: T1078.004 (Valid Accounts: Cloud Accounts),
+//               T1098.003 (Account Manipulation: Additional Cloud Roles)
+// Data Source: AuditLogs (Entra ID RoleManagement category)
+// Platform:    Microsoft Sentinel / Log Analytics
+// Time window: 1 day (scheduled analytic)
+// Reference:   ./Role-Assigned-Outside-PIM.md
+// Context:     PIM exists so privileged roles are time-bounded, approval-gated, and
+//              auditable. Any role assignment that bypasses PIM creates a standing,
+//              un-reviewed admin. Attackers and insiders both favor this path.
+//
+// Recommended actions on hits:
+// - Confirm the assignment was authorized (change-management record)
+// - If unauthorized: remove the role (Remove-MgDirectoryRoleMemberByRef)
+// - Move the role to PIM-eligible for proper lifecycle management
+// - Review the initiator for signs of account compromise
+//
+// ---------------------------------------------------------------------------
+// Extended context, background, tuning, and attribution
+// ---------------------------------------------------------------------------
+//
+// # Directory Role Assigned Outside PIM
+//
+// <sub>[← Back to KQL index](../README.md)</sub>
+//
+// > Source: [Azure-Sentinel / Solutions/Microsoft Entra ID/Analytic Rules/PrivlegedRoleAssignedOutsidePIM.yaml](https://github.com/Azure/Azure-Sentinel/blob/master/Solutions/Microsoft%20Entra%20ID/Analytic%20Rules/PrivlegedRoleAssignedOutsidePIM.yaml) · MIT License · Microsoft AADSecOpsGuide
+//
+// ## Why this hunt
+//
+// Privileged Identity Management (PIM) exists precisely so that admin roles are:
+//
+// 1. **Time-bounded** — you activate, do your task, deactivate; no standing privilege
+// 2. **Approval-gated** — high-impact roles require another admin to approve
+// 3. **MFA-enforced** — activation requires re-prove of identity
+// 4. **Auditable** — every activation generates a justification record
+//
+// A role assignment that **bypasses PIM** and creates a permanent member of a directory role is, by definition, the absence of all those controls. The attacker or insider now has:
+//
+// - Standing access that does not time out
+// - No per-session MFA prompt
+// - No activation justification on record
+//
+// Adversaries prefer this path because it *looks normal in directory outputs* — `Get-MgDirectoryRoleMember` doesn't visually distinguish PIM-eligible from permanent members. Auditors have to look at role *assignment* origin to tell.
+//
+// The query uses two detections:
+//
+// - Direct `Add member to role outside of PIM` operation (when PIM is configured)
+// - `Add member to role` where the initiating service is **not** `MS-PIM` (backstop for tenants without PIM)
+//
+// ## Expected output
+//
+// | Column | What it tells you |
+// |---|---|
+// | `TimeGenerated` | When the assignment happened |
+// | `InitiatingUserPrincipalName` | Who made the assignment |
+// | `TargetUserPrincipalName` | Who received the role |
+// | `InitiatingIpAddress` | Source IP of the initiator |
+// | `OperationName` | `Add member to role outside of PIM` or `Add member to role` |
+//
+// A PIM-mature tenant returns **near-zero** hits — PIM should be the only path. A tenant still in transition will see legacy direct assignments; these should be auto-filed as tickets for migration.
+//
+// ## Tuning notes
+//
+// - **Role filter** — extend `where` to only alert on high-privilege roles (Global Admin, Privileged Role Admin, Security Admin) for a high-signal subset. Standard role list in Microsoft Learn
+// - **Time window** — 1 day default. For real-time alerting, tighten to 1h and set `queryFrequency` to match
+// - **Known-good actor allow-list** — dedicated tenant-management service principals that legitimately manage roles (rare; most migrations move this to PIM APIs)
+// - **MS-PIM-Fairfax** — the filter already excludes the Government Cloud equivalent. Add your cloud-specific identity if needed
+// - **Enrich with role name** — extend with `| mv-apply TargetResource = TargetResources on (where TargetResource.type == "Role" | extend RoleName = tostring(TargetResource.displayName))` to show which role
+//
+// ## Recommended hardening
+//
+// 1. **Full PIM adoption** — eliminate all permanent admin assignments, even for break-glass (use the dedicated accounts for those)
+// 2. **PIM activation policies** — max activation duration 8 hours, require MFA, require justification, require approval for the top 3 roles
+// 3. **Access reviews for all permanent assignments** — Entra ID Access Reviews quarterly, auto-expire if not reviewed
+// 4. **Custom RBAC over built-in** — where possible, create purpose-specific custom roles with least privilege instead of assigning full built-in roles
+// 5. **Sentinel analytic + auto-response playbook** — when this rule fires, Logic App opens a ticket + pages on-call admin
+// 6. **Block non-approved role-management principals** — Conditional Access for Workload Identities: only specific SPs may call `AzureADGraph` role-management endpoints
+// 7. **Audit log retention** — ensure 180+ day retention for `RoleManagement` category
+//
+// ## References
+//
+// - [MITRE ATT&CK T1078.004](https://attack.mitre.org/techniques/T1078/004/)
+// - [MITRE ATT&CK T1098.003](https://attack.mitre.org/techniques/T1098/003/)
+// - [Microsoft Learn: Privileged Identity Management overview](https://learn.microsoft.com/entra/id-governance/privileged-identity-management/pim-configure)
+// - [Microsoft AADSecOpsGuide — privileged accounts](https://learn.microsoft.com/entra/architecture/security-operations-privileged-accounts)
+
+AuditLogs
+| where Category =~ "RoleManagement"
+| where OperationName has "Add member to role outside of PIM"
+    or (LoggedByService =~ "Core Directory" and OperationName =~ "Add member to role" and Identity != "MS-PIM" and Identity != "MS-PIM-Fairfax")
+| mv-apply TargetResource = TargetResources on (
+    where TargetResource.type =~ "User"
+    | extend TargetUserPrincipalName = tostring(TargetResource.userPrincipalName)
+  )
+| extend InitiatingAppName = tostring(InitiatedBy.app.displayName)
+| extend InitiatingAppServicePrincipalId = tostring(InitiatedBy.app.servicePrincipalId)
+| extend InitiatingUserPrincipalName = tostring(InitiatedBy.user.userPrincipalName)
+| extend InitiatingAadUserId = tostring(InitiatedBy.user.id)
+| extend InitiatingIpAddress = tostring(iff(isnotempty(InitiatedBy.user.ipAddress), InitiatedBy.user.ipAddress, InitiatedBy.app.ipAddress))
+| extend TargetName = tostring(split(TargetUserPrincipalName,'@',0)[0]), TargetUPNSuffix = tostring(split(TargetUserPrincipalName,'@',1)[0])
+| extend InitiatedByName = tostring(split(InitiatingUserPrincipalName,'@',0)[0]), InitiatedByUPNSuffix = tostring(split(InitiatingUserPrincipalName,'@',1)[0])

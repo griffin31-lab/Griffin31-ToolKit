@@ -1,0 +1,124 @@
+// Name: Persistence via Scheduled Task / Registry Run Key / Startup Folder
+// Description: Surfaces the three most common Windows user-land persistence primitives:
+//              (1) scheduled tasks pointing at AppData / Local / LocalLow paths,
+//              (2) registry Run / RunOnce key writes,
+//              (3) file creations in per-user or machine-wide Startup folders.
+// MITRE ATT&CK: T1053.005 (Scheduled Task/Job: Scheduled Task),
+//               T1547.001 (Boot/Logon Autostart: Registry Run Keys / Startup Folder)
+// Data Source: DeviceEvents, DeviceRegistryEvents, DeviceFileEvents
+// Platform:    Microsoft Defender XDR / Microsoft Sentinel
+// Time window: 7 days
+// Reference:   ./Persistence-Scheduled-Task-Run-Key.md
+// Context:     These three primitives account for the majority of Windows user-mode
+//              persistence observed in incident response. They do not require admin
+//              rights (per-user scope) and are the first action of most droppers,
+//              RATs, and infostealers after initial execution.
+//
+// Recommended actions on hits:
+// - Review the file path being launched — anything in AppData / Temp / Downloads is suspect
+// - Check the creating process — if it's a browser, Office app, or script host, investigate
+// - Pull the user's recent execution chain to find the initial dropper
+// - Remove the persistence artifact and the dropper, then rotate the user's creds
+// - Promote to custom detection for immediate alerting
+
+// ---- Block 1: Scheduled tasks created or updated with payloads in AppData ----
+//
+// ---------------------------------------------------------------------------
+// Extended context, background, tuning, and attribution
+// ---------------------------------------------------------------------------
+//
+// # Persistence via Scheduled Task / Registry Run Key / Startup Folder
+//
+// <sub>[← Back to KQL index](../README.md)</sub>
+//
+// ## Why this hunt
+//
+// When malware gets onto a host, the very next thing it does is make sure it survives a reboot. On Windows user-mode, three primitives dominate:
+//
+// 1. **Scheduled Tasks** pointing at an executable in a user-writable location (`%AppData%`, `%LocalAppData%`, `%TEMP%`, `C:\Users\Public`). Per-user tasks do not require admin rights.
+// 2. **Registry Run / RunOnce keys** under `HKCU` (user) or `HKLM` (machine) `\Software\Microsoft\Windows\CurrentVersion\Run(Once)`. Same idea — trivial per-user persistence.
+// 3. **Startup folder** — a shortcut or binary dropped in `%AppData%\Microsoft\Windows\Start Menu\Programs\Startup` runs at every logon.
+//
+// This hunt unions all three into a single result set, so an analyst reviewing a possibly-compromised device gets the full persistence picture in one query.
+//
+// ## Expected output
+//
+// Unified schema across the three persistence types:
+//
+// | Column | Meaning |
+// |---|---|
+// | `Persistence` | Which primitive was used: `ScheduledTask`, `RegistryRunKey`, `StartupFolder` |
+// | `Artifact` | Task name, registry key, or filename |
+// | `Details` | The full task XML / registry value / folder path — contains the payload reference |
+// | `InitiatingProcessFileName` | Which process created the artifact. If it's a browser, Office app, or random executable in `%TEMP%`, investigate immediately. |
+// | `InitiatingProcessAccountUpn` | The user context |
+//
+// Normal hits come from: app installers (Adobe Updater, Zoom, Teams), OneDrive, legitimate browser updaters, LOB tooling. Tune exclusions by `InitiatingProcessFileName` or explicit paths.
+//
+// ## Tuning notes
+//
+// - **Scheduled Task** detection is already filtered against common false positives (OneDrive update tasks). Add your known-good app installers to `TaskExclusions`.
+// - **Registry Run keys** — legitimate apps use them too. A quick baseline: run the query, export the `Details` column, allow-list anything you recognize, alert on everything else.
+// - **Startup folder** — low-volume, high-signal. Rarely false-positive after initial baseline.
+// - For alerting, run on `ago(1h)` and alert on any new value not in the allow-list.
+//
+// ## Recommended hardening
+//
+// 1. **AppLocker / WDAC (Windows Defender Application Control)** — blocks executables launched from `%AppData%` and `%TEMP%` regardless of persistence mechanism. This is the strongest control for the class.
+// 2. **Enable ASR rule** — *Block executable files from running unless they meet a prevalence, age, or trusted list criterion* (`01443614-cd74-433a-b99e-2ecdc07bfc25`)
+// 3. **Controlled folder access** (Defender for Endpoint) — blocks unauthorized writes to common persistence locations
+// 4. **Credential hygiene** — persistence only matters if the compromised account has useful access. Tier your privileges.
+// 5. **Don't grant local admin to end users** — all three persistence primitives work at user scope, but admin scope widens the blast radius considerably
+// 6. **Run Autoruns by Sysinternals quarterly** on critical hosts as a manual audit
+//
+// ## Source & attribution
+//
+// Query composed from two MIT-licensed sources:
+// - **Bert-JanP/Hunting-Queries-Detection-Rules** — `Defender For Endpoint/ScheduledTasksFromAppDataCreatedOrUpdated.md` (task logic and exclusion list)
+// - **Bert-JanP/Hunting-Queries-Detection-Rules** — `DFIR/MDE - Registry-Run-Keys-Forensics.md` (Run key paths)
+//
+// Startup-folder block is an original composition based on the MITRE T1547.001 file locations.
+//
+// ## References
+//
+// - [MITRE ATT&CK T1053.005 — Scheduled Task](https://attack.mitre.org/techniques/T1053/005/)
+// - [MITRE ATT&CK T1547.001 — Registry Run Keys / Startup Folder](https://attack.mitre.org/techniques/T1547/001/)
+// - [Microsoft Learn: Attack surface reduction rules reference](https://learn.microsoft.com/en-us/defender-endpoint/attack-surface-reduction-rules-reference)
+// - [The DFIR Spot: Evil on Schedule — investigating malicious Windows tasks](https://www.thedfirspot.com/post/evil-on-schedule-investigating-malicious-windows-tasks)
+
+let Filters = dynamic(['AppData', '%localappdata%', '%appdata%', 'Temp', 'Public']);
+let TaskExclusions = dynamic([@'\\Microsoft\\OneDrive\\OneDriveStandaloneUpdater.exe', 'OneDriveLauncher.exe', 'MicrosoftEdgeUpdate']);
+let ScheduledTasks =
+    DeviceEvents
+    | where Timestamp > ago(7d)
+    | where ActionType in ('ScheduledTaskCreated', 'ScheduledTaskUpdated')
+    | where AdditionalFields has_any (Filters)
+    | extend Parsed   = parse_json(AdditionalFields)
+    | extend TaskName = tostring(Parsed.TaskName), TaskContent = tostring(Parsed.TaskContent)
+    | where not(TaskContent has_any (TaskExclusions))
+    | project Timestamp, DeviceName, Persistence = "ScheduledTask",
+              Artifact = TaskName, Details = TaskContent,
+              InitiatingProcessFileName, InitiatingProcessAccountUpn;
+// ---- Block 2: Registry Run / RunOnce key writes ----
+let RunKeys =
+    DeviceRegistryEvents
+    | where Timestamp > ago(7d)
+    | where ActionType == "RegistryValueSet"
+    | where RegistryKey endswith @'\Software\Microsoft\Windows\CurrentVersion\Run'
+         or RegistryKey endswith @'\Software\Microsoft\Windows\CurrentVersion\RunOnce'
+         or RegistryKey endswith @'\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run'
+         or RegistryKey endswith @'\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\RunOnce'
+    | project Timestamp, DeviceName, Persistence = "RegistryRunKey",
+              Artifact = RegistryKey, Details = RegistryValueData,
+              InitiatingProcessFileName, InitiatingProcessAccountUpn = tostring(InitiatingProcessAccountUpn);
+// ---- Block 3: Files dropped in Startup folders ----
+let StartupFolder =
+    DeviceFileEvents
+    | where Timestamp > ago(7d)
+    | where ActionType == "FileCreated"
+    | where FolderPath has @"\Start Menu\Programs\Startup"
+    | project Timestamp, DeviceName, Persistence = "StartupFolder",
+              Artifact = FileName, Details = FolderPath,
+              InitiatingProcessFileName, InitiatingProcessAccountUpn;
+union ScheduledTasks, RunKeys, StartupFolder
+| sort by Timestamp desc

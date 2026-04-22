@@ -1,0 +1,103 @@
+// Name: First-Time Legacy Authentication Success
+// Description: Finds users who successfully signed in via legacy authentication protocols
+//              (IMAP, POP3, SMTP AUTH, older Exchange clients, etc.) for the first time
+//              in 90 days. Legacy auth bypasses MFA and Conditional Access, so a new user
+//              suddenly authenticating this way is a strong account-takeover indicator.
+// MITRE ATT&CK: T1110 (Brute Force),
+//               T1110.003 (Password Spraying),
+//               T1078.004 (Valid Accounts: Cloud Accounts)
+// Data Source: SigninLogs (Entra ID)
+// Platform:    Microsoft Sentinel / Log Analytics  (Advanced Hunting variant uses AADSignInEventsBeta)
+// Time window: 90-day baseline, 1-day detection window
+// Reference:   ./First-Time-Legacy-Auth-Success.md
+// Context:     Microsoft disabled basic auth for Exchange Online in most tenants in 2022,
+//              but SMTP AUTH, some EWS scenarios, and on-prem ActiveSync proxy paths still
+//              allow legacy auth. Password spray campaigns (notably APT28 / Midnight Blizzard
+//              2024 telemetry) actively hunt for tenants with legacy auth still enabled
+//              because it is the one pathway that ignores MFA and CA.
+//
+// Recommended actions on hits:
+// - Block legacy auth at the tenant level via Conditional Access if possible
+// - For unavoidable legacy apps: scope a CA policy that requires named locations + app passwords
+// - Investigate the user — if they didn't intend to use a legacy client, treat as ATO
+// - Revoke the user's refresh tokens and force password reset + MFA method re-registration
+//
+// ---------------------------------------------------------------------------
+// Extended context, background, tuning, and attribution
+// ---------------------------------------------------------------------------
+//
+// # First-Time Legacy Authentication Success
+//
+// <sub>[← Back to KQL index](../README.md)</sub>
+//
+// ## Why this hunt
+//
+// "Legacy authentication" is Microsoft's term for protocols that do not support modern authentication: IMAP, POP3, SMTP AUTH, older Exchange ActiveSync, EWS, and anything built on Basic Auth. **Legacy auth cannot do MFA.** The tenant's Conditional Access policies that rely on grant controls (`Require MFA`) do nothing for these sessions.
+//
+// Microsoft turned off basic auth for most of Exchange Online in October 2022, but several paths remain:
+//
+// - SMTP AUTH is still on by default for sending email
+// - On-prem Exchange hybrid environments proxy legacy protocols
+// - Some POS / line-of-business apps still use IMAP or EWS
+//
+// Threat actors running password-spray campaigns specifically enumerate tenants for any remaining legacy auth endpoint. Many of the 2023–2025 Midnight Blizzard / APT28 takeover cases start with a successful legacy-auth password spray.
+//
+// This hunt flags **the first user to succeed via legacy auth in 90 days**. Once a tenant has blocked legacy auth properly, this query should be silent. A new hit means one of:
+//
+// 1. Legacy auth is not fully blocked and an attacker just found the gap
+// 2. A new legitimate legacy-auth user (integration, service account) appeared — worth confirming
+//
+// ## Expected output
+//
+// | Column | Meaning |
+// |---|---|
+// | `UserPrincipalName` | The user signing in via legacy auth |
+// | `AppDisplayName` | What the session called itself (Exchange ActiveSync, IMAP4, etc.) |
+// | `ClientAppUsed` | The legacy client category |
+// | `IPAddress` | Source IP |
+//
+// ### Red flags
+//
+// - `ClientAppUsed` is `IMAP4`, `POP3`, `SMTP`, `Authenticated SMTP`, `Exchange ActiveSync`
+// - `IPAddress` is a residential ISP, VPN, or hosting provider — not your corp egress
+// - `UserPrincipalName` has never used a legacy client before (first-time property is the filter)
+// - Hit follows a burst of failed sign-ins for the same user (use `Identity-SummarizeLegacyAuth.kql` as a companion)
+//
+// ## Tuning notes
+//
+// - **Retention:** SigninLogs retention varies. 90d baseline is strong but shorten if needed.
+// - **Advanced Hunting:** the `AADSignInEventsBeta` variant (in the source file) only has 30 days; use SigninLogs in Sentinel for the full window.
+// - **Known legitimate service accounts:** some printers / MFPs authenticate via SMTP AUTH. Allow-list by UPN after verifying.
+// - **Complement:** cross-reference with `Identity-VisualizeLegacyAuth.kql` in reprise99 to visualize remaining legacy-auth usage and build a zero-legacy migration plan.
+//
+// ## Recommended hardening
+//
+// 1. **Block legacy auth via Conditional Access** — single most effective control. Policy: `Client apps = legacy authentication clients`, `Access = Block`.
+// 2. **Disable SMTP AUTH tenant-wide** (`Set-TransportConfig -SmtpClientAuthenticationDisabled $true`). Re-enable per-mailbox only for unavoidable cases.
+// 3. **Disable legacy protocols per-mailbox** using authentication policies.
+// 4. **Migrate any remaining legacy clients** to OAuth or Graph API equivalents.
+// 5. **Alert, not just detect** — promote this hunt to a scheduled analytic rule once legacy auth is blocked; any hit should be treated as a CA failure signal.
+//
+// ## References
+//
+// - [Block legacy authentication with Conditional Access](https://learn.microsoft.com/en-us/entra/identity/conditional-access/howto-conditional-access-policy-block-legacy)
+// - [Microsoft: End of basic auth in Exchange Online](https://techcommunity.microsoft.com/t5/exchange-team-blog/basic-authentication-deprecation-in-exchange-online-september/ba-p/3609437)
+// - [MITRE ATT&CK T1110.003 — Password Spraying](https://attack.mitre.org/techniques/T1110/003/)
+//
+// ## Source & attribution
+//
+// > Source: [reprise99/Sentinel-Queries — Azure Active Directory/Identity-FirstTimeLegacyAuth.kql](https://github.com/reprise99/Sentinel-Queries/blob/main/Azure%20Active%20Directory/Identity-FirstTimeLegacyAuth.kql) · MIT License
+
+let knownusers=
+    SigninLogs
+    | where TimeGenerated > ago(90d) and TimeGenerated < ago(1d)
+    | where ResultType == 0
+    | where ClientAppUsed !in ("Mobile Apps and Desktop clients", "Browser")
+    | distinct UserPrincipalName;
+SigninLogs
+| where TimeGenerated > ago(1d)
+| where ResultType == 0
+| where ClientAppUsed !in ("Mobile Apps and Desktop clients", "Browser")
+| where isnotempty(ClientAppUsed)
+| where UserPrincipalName !in (knownusers)
+| distinct UserPrincipalName, AppDisplayName, ClientAppUsed, IPAddress

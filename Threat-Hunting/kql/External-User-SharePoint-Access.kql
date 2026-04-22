@@ -1,0 +1,101 @@
+// Name: External User Accessed Internal SharePoint File
+// Description: Pivots shared-link creation events to the downstream access by the
+//              external party. Surfaces who outside the org actually touched the file
+//              after a secure link was issued — the real exfiltration beat.
+// MITRE ATT&CK: T1530 (Data from Cloud Storage),
+//               T1213.002 (Data from Information Repositories: SharePoint),
+//               T1078.004 (Valid Accounts: Cloud Accounts)
+// Data Source: OfficeActivity (SharePoint / OneDrive)
+// Platform:    Microsoft Sentinel / Log Analytics
+// Time window: 30 days (tune to audit retention)
+// Reference:   ./External-User-SharePoint-Access.md
+// Context:     Sharing-link creation alone is noisy — access by an external identity
+//              after the share is the actual risk moment. This query joins the link
+//              event with downstream access grouped by the sharer.
+//
+// Recommended actions on hits:
+// - Replace 'yourdomain.com' in the filter with your tenant's primary SMTP domain(s)
+// - Confirm the sharer intended to grant access to that external account
+// - If the file carries a sensitivity label, verify the label permits external access
+// - Revoke the sharing link in SharePoint admin if unauthorized
+//
+// ---------------------------------------------------------------------------
+// Extended context, background, tuning, and attribution
+// ---------------------------------------------------------------------------
+//
+// # External User Accessed Internal SharePoint File
+//
+// <sub>[← Back to KQL index](../README.md)</sub>
+//
+// > Source: [reprise99 / Sentinel-Queries — OfficeActivity-SummaryofExternalActivity.kql](https://github.com/reprise99/Sentinel-Queries/blob/main/Office%20365/OfficeActivity-SummaryofExternalActivity.kql) · MIT License
+//
+// ## Why this hunt
+//
+// Sharing links are created constantly in a healthy M365 tenant — most alerts on "link created" are noise. The real risk moment is when an **external identity actually touches the file** after a link is created. This query joins link-creation events against downstream access events on `OfficeObjectId`, grouped by the user who shared.
+//
+// That pivot answers three questions at once:
+//
+// 1. **Who shared?** — `UserWhoShared`
+// 2. **What file?** — `OfficeObjectId`
+// 3. **Which external accounts actually opened it?** — `ExternalUsers`
+//
+// Why it matters:
+//
+// - Overshared files are the #1 cause of M365 data-leak incidents. Many users over-share via "anyone with the link" without realizing
+// - Post-compromise, attackers often share files to attacker-controlled external mailboxes as a low-noise exfiltration path
+// - Third-party access via guest links is increasingly regulated under GDPR / HIPAA / SOX — auditors ask for this exact report
+//
+// ## Expected output
+//
+// | Column | What it tells you |
+// |---|---|
+// | `UserWhoShared` | Internal UPN that created the sharing link |
+// | `OfficeObjectId` | Full path to the shared file |
+// | `ExternalOperation` | Which access operation the external party performed (FileAccessed, FileDownloaded, etc.) |
+// | `ExternalUsers` | Set of external identities (UPNs or guest aliases) that touched the file |
+//
+// Typical non-suspicious hits:
+//
+// - Vendor / partner you already work with accessing a shared proposal
+// - Customer pulling a document you intentionally shared
+//
+// Suspicious hits:
+//
+// - Access from a consumer-domain address (`gmail.com`, `outlook.com`) you don't do business with
+// - Access from a **#EXT#** guest you didn't onboard
+// - File path contains "HR", "Finance", "Payroll", source code, or is sensitivity-labeled Confidential+
+//
+// ## Tuning notes
+//
+// - **Domain filter** — replace `yourdomain.com` with your organisation's real primary and alias SMTP domains (comma-expand if you have multiple)
+// - **`app@sharepoint`** — excluded because it is the SharePoint system account (it appears on every item)
+// - **Time window** — default 30 days. For a scheduled analytic rule, tighten to 1 day; for audit reporting, expand to your retention window
+// - **Noise reduction** — add `| where OfficeObjectId !has "/personal/"` to exclude OneDrive or `| where OfficeObjectId has "/sites/Executive"` to scope to sensitive sites
+// - **Pair with labels** — join against `MicrosoftPurviewInformationProtection` to show which labels were on the accessed file
+//
+// ## Recommended hardening
+//
+// 1. **Tenant-wide external sharing defaults** — SharePoint admin center > Policies > Sharing — set to "New and existing guests" or "Only people in your organization" as the default
+// 2. **Site-level sharing settings** — override the tenant default to "Only people in your organization" for HR / Finance / Engineering sites
+// 3. **Expiration + password on guest links** — mandatory guest link expiration (30 days max) and access requests reviewed monthly
+// 4. **Sensitivity labels with encryption** — Confidential+ labels should block external access via label policy, not via share prompts
+// 5. **Microsoft Purview Insider Risk Management** — native "sharing with external users" policy type
+// 6. **Conditional Access for guest users** — require MFA + compliant device on the guest's side for accessing SharePoint
+//
+// ## References
+//
+// - [MITRE ATT&CK T1530](https://attack.mitre.org/techniques/T1530/)
+// - [MITRE ATT&CK T1213.002 — SharePoint](https://attack.mitre.org/techniques/T1213/002/)
+// - [Microsoft Learn: Manage sharing in SharePoint](https://learn.microsoft.com/sharepoint/turn-external-sharing-on-or-off)
+// - [Microsoft Learn: External sharing overview](https://learn.microsoft.com/sharepoint/external-sharing-overview)
+
+OfficeActivity
+| project LinkCreatedTime=TimeGenerated, Operation, UserWhoShared=UserId, OfficeObjectId
+| where Operation in ('AddedToSecureLink', 'SecureLinkCreated', 'SecureLinkUpdated', 'SharingInvitationCreated')
+| join kind=inner (
+    OfficeActivity
+    | project LinkClickedTime=TimeGenerated, Operation, UserWhoAccessed=UserId, OfficeObjectId
+  ) on OfficeObjectId
+| where UserWhoAccessed !endswith "yourdomain.com" and UserWhoAccessed != "app@sharepoint"
+| extend ExternalOperation=Operation1
+| summarize ExternalUsers=make_set(UserWhoAccessed) by UserWhoShared, OfficeObjectId, ExternalOperation

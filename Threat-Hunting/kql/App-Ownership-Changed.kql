@@ -1,0 +1,108 @@
+// Name: Application Ownership Changed (Add owner to application)
+// Description: Detects when an owner is added to an Entra ID application registration.
+//              Attacker-gained ownership grants full control of the app — ability to
+//              add secrets, modify reply URLs, change permissions, and delete.
+// MITRE ATT&CK: T1098.003 (Account Manipulation: Additional Cloud Roles),
+//               T1098.001 (Additional Cloud Credentials),
+//               T1078.004 (Valid Accounts: Cloud Accounts)
+// Data Source: AuditLogs (Entra ID directory audit)
+// Platform:    Microsoft Sentinel / Log Analytics
+// Time window: 2 hours (scheduled analytic) — tune to 30d for hunt
+// Reference:   ./App-Ownership-Changed.md
+// Context:     Becoming an owner of a consented app is a one-step path to the full
+//              persistence and privilege that app carries. Ownership changes on
+//              high-privilege apps should always alert.
+//
+// Recommended actions on hits:
+// - Confirm the TargetAppName — is this a critical / first-party app?
+// - Validate AddedUser against the expected app-owner list
+// - If unauthorized: remove ownership (Remove-MgApplicationOwner)
+// - Review subsequent activity by the new owner (credential adds, URL changes)
+//
+// ---------------------------------------------------------------------------
+// Extended context, background, tuning, and attribution
+// ---------------------------------------------------------------------------
+//
+// # Application Ownership Changed
+//
+// <sub>[← Back to KQL index](../README.md)</sub>
+//
+// > Source: [Azure-Sentinel / Detections/AuditLogs/ChangestoApplicationOwnership.yaml](https://github.com/Azure/Azure-Sentinel/blob/master/Detections/AuditLogs/ChangestoApplicationOwnership.yaml) · MIT License · Microsoft AADSecOpsGuide
+//
+// ## Why this hunt
+//
+// Ownership of an Entra ID application registration is a **privileged role** in disguise. An application owner can:
+//
+// - Add new client secrets / certificates (equivalent of a persistent password)
+// - Modify reply URLs (redirect callbacks to attacker-controlled endpoints)
+// - Change required permissions (trigger new consent)
+// - Update the app manifest, branding, and assigned users
+// - Delete the application outright
+//
+// If an attacker obtains ownership of a well-consented app (especially one with Graph `*.All` permissions), they inherit the full access that app is trusted with — without ever needing to compromise the original owner again.
+//
+// Documented abuse patterns:
+//
+// - Midnight Blizzard took ownership of a consent-heavy first-party app during lateral movement in 2024
+// - Commodity BEC kits now include "add me as owner of the HR app" as a post-compromise step
+// - Internal insider-threat scenarios: a departing admin adds a personal account as co-owner before resignation
+//
+// ## Expected output
+//
+// | Column | What it tells you |
+// |---|---|
+// | `TimeGenerated` | When ownership was granted |
+// | `InitiatingUserPrincipalName` / `InitiatingIPAddress` | Who performed the change and from where |
+// | `TargetAppName` | Which application was modified |
+// | `AddedUser` | The new owner — match against expected app-owner watchlist |
+// | `UpdatedBy` | Resolves to user UPN or initiating app name |
+//
+// High-signal hits:
+//
+// - `TargetAppName` is a critical or first-party Microsoft app
+// - `AddedUser` is a standard user (not normally in application-admin groups)
+// - `InitiatingIPAddress` is unusual for the initiator's historic sign-ins
+// - Chain follow-up within minutes: ownership added → credential added → reply URL changed
+//
+// ## Tuning notes
+//
+// - **Add high-value app watchlist** — maintain a list of app-IDs for Tier-0 apps and filter to them first for tightest alerts
+// - **Exclude expected admin groups** — if the initiator is in `Application Administrator` via PIM, reduce severity but do not suppress
+// - **Remove owner too** — `OperationName == "Remove owner from application"` is the counterpart; pair both in the same rule for full coverage
+// - **Time window** — 2h default is for near-real-time alerting; widen for hunts
+// - **Pair with `Credential-Added-To-App-Registration.kql`** — a sequence of `Add owner` then `Credential added` by the same or newly-added actor within 24h is very high confidence
+//
+// ## Recommended hardening
+//
+// 1. **Restrict who can be an app owner** — Entra admin > User settings > "Users can create Azure AD tenants" + enforce via `authorizationPolicy`
+// 2. **PIM for Application Administrator** — just-in-time, time-bound, approval-required
+// 3. **Quarterly access reviews** on all app owners — especially for apps with Graph `*.All` scopes
+// 4. **App Governance in Defender for Cloud Apps** — anomaly detection on sudden ownership changes
+// 5. **Alert on every ownership change of top-N-privileged apps** — curated list of apps with broad Graph / Azure permissions
+// 6. **Separate owner roles from engineer roles** — developer who builds the app should not be an owner of the production app registration (use CI/CD service connections instead)
+//
+// ## References
+//
+// - [MITRE ATT&CK T1098.003](https://attack.mitre.org/techniques/T1098/003/)
+// - [Microsoft Learn: Application management security operations](https://learn.microsoft.com/entra/architecture/security-operations-applications#new-owner)
+// - [Microsoft AADSecOpsGuide — applications](https://learn.microsoft.com/entra/architecture/security-operations-applications)
+
+AuditLogs
+| where Category =~ "ApplicationManagement"
+| where OperationName =~ "Add owner to application"
+| extend InitiatingAppName = tostring(InitiatedBy.app.displayName)
+| extend InitiatingAppServicePrincipalId = tostring(InitiatedBy.app.servicePrincipalId)
+| extend InitiatingUserPrincipalName = tostring(InitiatedBy.user.userPrincipalName)
+| extend InitiatingAadUserId = tostring(InitiatedBy.user.id)
+| extend InitiatingIPAddress = tostring(InitiatedBy.user.ipAddress)
+| extend TargetUserPrincipalName = TargetResources[0].userPrincipalName
+| extend TargetAadUserId = tostring(TargetResources[0].id)
+| extend mod_props = TargetResources[0].modifiedProperties
+| mv-expand mod_props
+| where mod_props.displayName =~ "Application.DisplayName"
+| extend TargetAppName = tostring(parse_json(tostring(mod_props.newValue)))
+| extend AddedUser = TargetUserPrincipalName
+| extend UpdatedBy = iif(isnotempty(InitiatingAppName), InitiatingAppName, InitiatingUserPrincipalName)
+| extend InitiatingAccountName = tostring(split(InitiatingUserPrincipalName, "@")[0]), InitiatingAccountUPNSuffix = tostring(split(InitiatingUserPrincipalName, "@")[1])
+| extend TargetAccountName = tostring(split(TargetUserPrincipalName, "@")[0]), TargetAccountUPNSuffix = tostring(split(TargetUserPrincipalName, "@")[1])
+| project-reorder TimeGenerated, InitiatingAppName, InitiatingAppServicePrincipalId, InitiatingAadUserId, InitiatingUserPrincipalName, InitiatingIPAddress, TargetAppName, AddedUser, UpdatedBy

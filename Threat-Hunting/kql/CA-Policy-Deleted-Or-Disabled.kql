@@ -1,0 +1,120 @@
+// Name: Conditional Access Policy Deleted or Disabled
+// Description: Detects deletion or transition-to-disabled of Entra Conditional Access
+//              policies. Defense-evasion precursor: attacker removes an MFA or
+//              device-compliance policy before authenticating laterally.
+// MITRE ATT&CK: T1562.007 (Impair Defenses: Disable or Modify Cloud Firewall),
+//               T1556    (Modify Authentication Process),
+//               T1562    (Impair Defenses)
+// Data Source: AuditLogs (Entra ID directory audit)
+// Platform:    Microsoft Sentinel / Log Analytics
+// Time window: 5 minutes (scheduled analytic) — widen for hunts
+// Reference:   ./CA-Policy-Deleted-Or-Disabled.md
+// Context:     Scattered Spider / UNC3944 and other identity-focused actors
+//              routinely delete or disable CA policies mid-attack to reopen
+//              authentication paths they were previously blocked on.
+//
+// Recommended actions on hits:
+// - Treat every hit as a potential incident until proven otherwise
+// - Confirm the actor is an authorized CA admin
+// - Review all sign-ins since the change for activity the disabled policy would have blocked
+// - Re-enable / restore the policy from Azure Policy / Conditional Access backup
+// - Audit PIM activations for Security / Global / Conditional Access Admin
+//
+// ---------------------------------------------------------------------------
+// Extended context, background, tuning, and attribution
+// ---------------------------------------------------------------------------
+//
+// # Conditional Access Policy Deleted or Disabled
+//
+// <sub>[← Back to KQL index](../README.md)</sub>
+//
+// > Source: Merged from two MIT-licensed Microsoft queries:
+// > - [Azure-Sentinel / Solutions/Microsoft Entra ID/Analytic Rules/Conditional Access - A Conditional Access policy was deleted.yaml](https://github.com/Azure/Azure-Sentinel/blob/master/Solutions/Microsoft%20Entra%20ID/Analytic%20Rules/Conditional%20Access%20-%20A%20Conditional%20Access%20policy%20was%20deleted.yaml)
+// > - [Azure-Sentinel / Solutions/Microsoft Entra ID/Analytic Rules/Conditional Access - A Conditional Access policy was disabled.yaml](https://github.com/Azure/Azure-Sentinel/blob/master/Solutions/Microsoft%20Entra%20ID/Analytic%20Rules/Conditional%20Access%20-%20A%20Conditional%20Access%20policy%20was%20disabled.yaml)
+// > · Both MIT License
+//
+// ## Why this hunt
+//
+// Conditional Access is the **enforcement layer** for most M365 identity controls: MFA, compliant device, location restrictions, session controls. An attacker with sufficient privilege who disables or deletes a CA policy can reopen entire authentication paths that the defender thought were closed.
+//
+// Real-world examples:
+//
+// - **Scattered Spider / UNC3944** routinely social-engineers a help-desk into resetting credentials for a Conditional Access Admin, then disables the compliant-device / device-based CA policies before running commodity RMM tools
+// - **Storm-0539** persistence post-compromise — removes policies blocking their BYOD phones
+// - **Insider threat** — admin who is preparing to exfiltrate disables the DLP / session-control policy the night before
+//
+// Both operations leave unambiguous audit-log signatures:
+//
+// - `Delete conditional access policy` — policy is gone
+// - `Update conditional access policy` with `stateOld == "enabled"` and `stateNew == "disabled"` — policy still exists but is no longer enforcing
+//
+// ## Expected output
+//
+// | Column | What it tells you |
+// |---|---|
+// | `TimeGenerated` | When the change happened |
+// | `OperationName` | `Delete conditional access policy` or `Update conditional access policy` |
+// | `ChangeType` | Custom field: `Deleted` or `DisabledFromEnabled` |
+// | `policy` | Display name of the policy — identifies which control was weakened |
+// | `modifiedBy` | Actor UPN — who made the change |
+// | `accountName` / `upnSuffix` | Entity-mapping fields |
+// | `deletedPolicy` | Full JSON of the deleted policy (for restoration / forensics) |
+//
+// Zero legitimate use-cases for routine operations — a tenant should see this rarely, typically during planned security-policy rewrites.
+//
+// ## Tuning notes
+//
+// - **Report-only → enabled / disabled transitions** — this query specifically catches `enabled → disabled`. For completeness, pair with `CA-Policy-State-Report-Only-Downgrade.kql` which catches `enabled → enabledForReportingButNotEnforced`
+// - **Time window** — 5 min queryFrequency matches Microsoft's upstream default for near-real-time alerting
+// - **Change-control allow-list** — if you have an approved change-management window (e.g., Tuesday 18:00 UTC CAB), suppress hits from approved actors within that window — but still log them for audit
+// - **Pair with sign-in impact** — use the `policy` name to query `SigninLogs | where ConditionalAccessPolicies has "<name>"` for the hour immediately after disablement to see what sign-ins would have been blocked
+//
+// ## Recommended hardening
+//
+// 1. **CA policy-change approval** — require Entra PIM with approval for `Conditional Access Administrator` and `Security Administrator`
+// 2. **Break-glass exclusion review** — every quarter, verify only break-glass accounts remain excluded from critical CA policies (and that break-glass accounts are themselves heavily monitored)
+// 3. **Policy backup / version control** — export CA policies daily to a git-backed store for differential detection + restoration
+// 4. **Microsoft Sentinel ingestion + long retention** — AuditLogs table should retain at least 180 days for CA changes
+// 5. **Out-of-band alerting** — route this specific alert to a pager / SMS destination, not just a SIEM queue
+// 6. **Defender for Cloud Apps** — native `Change to CA policy by non-approved user` policy template; deploy on top of Sentinel rule
+//
+// ## References
+//
+// - [MITRE ATT&CK T1562.007 — Disable or Modify Cloud Firewall](https://attack.mitre.org/techniques/T1562/007/)
+// - [MITRE ATT&CK T1556 — Modify Authentication Process](https://attack.mitre.org/techniques/T1556/)
+// - [Microsoft Learn: Conditional Access security operations](https://learn.microsoft.com/entra/identity/conditional-access/monitor-conditional-access)
+// - [CISA advisory: Scattered Spider](https://www.cisa.gov/news-events/cybersecurity-advisories/aa23-320a)
+
+(union isfuzzy=true
+  (
+  AuditLogs
+  | where OperationName =~ "Delete conditional access policy"
+  | extend ChangeType = "Deleted"
+  | extend deletedPolicy = tostring(TargetResources[0].modifiedProperties[0].oldValue)
+  | extend policy = tostring(TargetResources[0].displayName)
+  ),
+  (
+  AuditLogs
+  | where OperationName =~ "Update conditional access policy"
+  | extend stateOld = extractjson("$.state", tostring(TargetResources[0].modifiedProperties[0].oldValue))
+  | extend stateNew = extractjson("$.state", tostring(TargetResources[0].modifiedProperties[0].newValue))
+  | where stateOld == "enabled" and stateNew == "disabled"
+  | extend ChangeType = "DisabledFromEnabled"
+  | extend deletedPolicy = ""
+  | extend policy = tostring(TargetResources[0].displayName)
+  )
+)
+| extend modifiedBy = tostring(InitiatedBy.user.userPrincipalName)
+| extend accountName = tostring(split(modifiedBy, "@")[0])
+| extend upnSuffix = tostring(split(modifiedBy, "@")[1])
+| project
+    TimeGenerated,
+    OperationName,
+    ChangeType,
+    policy,
+    modifiedBy,
+    accountName,
+    upnSuffix,
+    Result,
+    deletedPolicy
+| order by TimeGenerated desc

@@ -1,0 +1,126 @@
+// Name: First-Time OAuth Consenter (User With No Prior Consent History)
+// Description: Flags users who consented to an OAuth app for the first time in the last 24 hours,
+//              where they had not performed any "Add delegated permission grant" or
+//              "Add app role assignment to service principal" in the prior 365 days.
+// MITRE ATT&CK: T1566.002 (Phishing: Spearphishing Link),
+//               T1528 (Steal Application Access Token),
+//               T1204.001 (User Execution: Malicious Link)
+// Data Source: AuditLogs (Entra ID directory audit log)
+// Platform:    Microsoft Sentinel / Log Analytics
+// Time window: 365-day baseline, 1-day detection window
+// Reference:   ./First-Time-App-Consenter.md
+// Context:     OAuth consent phishing preys on users who never consent to apps and don't
+//              recognize the consent dialog. Once they click, the attacker gets a durable
+//              refresh token. A user whose first-ever consent happens during an
+//              off-hours "Docusign" email is almost always a phishing victim.
+//
+// Recommended actions on hits:
+// - Contact the user out-of-band — confirm they intended to consent
+// - Review the granted permissions (Permissions granted column)
+// - Revoke consent in Entra admin center > Enterprise apps > User consent
+// - Pivot by ServicePrincipalObjectId into SigninLogs / OfficeActivity for app activity
+// - If suspicious: revoke user sessions, force password reset, review mailbox for forwarding rules
+//
+// ---------------------------------------------------------------------------
+// Extended context, background, tuning, and attribution
+// ---------------------------------------------------------------------------
+//
+// # First-Time OAuth Consenter (User With No Prior Consent History)
+//
+// <sub>[← Back to KQL index](../README.md)</sub>
+//
+// ## Why this hunt
+//
+// Most users never consent to an OAuth app in their entire tenure — the dialog is rare, the language is confusing, and most legitimate apps they use were consented to once by an admin. When a user **who has never consented before** suddenly consents, that asymmetry is a strong phishing signal.
+//
+// OAuth consent phishing works like this:
+//
+// 1. Attacker sends a targeted email ("Review document", "Docusign", "Microsoft security alert") linking to `login.microsoftonline.com` — the real Microsoft URL.
+// 2. Microsoft shows a legitimate consent dialog for the attacker's app.
+// 3. User approves, often without reading scopes.
+// 4. Attacker receives a refresh token — **password-independent access** that survives MFA.
+//
+// The "first-time consenter" signal is valuable because:
+//
+// - A habitual consenter consenting again produces too much noise.
+// - A first-timer consenting is a behavioral anomaly that correlates strongly with social engineering.
+//
+// ## Expected output
+//
+// | Column | Meaning |
+// |---|---|
+// | `TimeGenerated` | When the consent happened |
+// | `Activity` | Delegated access vs. app-role assignment |
+// | `PermissionsGranted` | Array of the scopes granted (Mail.Read, Files.Read, offline_access, etc.) |
+// | `ServicePrincipalObjectId` | Pivot point for app sign-ins |
+// | `Actor` | The first-time consenter |
+//
+// ### Red flags
+//
+// - `PermissionsGranted` contains `offline_access` (enables refresh tokens — attacker wants durability)
+// - `PermissionsGranted` contains mail / file scopes (`Mail.Read`, `Files.Read.All`, `Sites.Read.All`)
+// - Multiple first-time consenters for the **same** `ServicePrincipalObjectId` in a short window — targeted campaign
+// - Consent during off-hours or from unusual geography (cross-reference with `SigninLogs`)
+//
+// ## Tuning notes
+//
+// - **Baseline window:** 365 days catches most "never consented" users. Shorten to 180d if AuditLogs retention is smaller.
+// - **Detection window:** 1 day is the default but this works well as a scheduled rule on 15-minute intervals.
+// - **Expected false positive:** new hires onboarding; deal with by excluding users whose `createdDateTime` is within 30 days.
+// - **Pivot chain:** catch a hit → look up `ServicePrincipalObjectId` → see who else consented → contain campaign.
+//
+// ## Recommended hardening
+//
+// 1. **Disable user consent entirely** — Entra → Enterprise apps → Consent and permissions → "Do not allow user consent". Pair with the admin consent workflow.
+// 2. **Or restrict to verified publishers and low-risk permissions** — the `microsoft-user-default-low` policy allows only non-sensitive scopes from Microsoft-verified apps.
+// 3. **Admin consent workflow** — give users a sanctioned path to request an app instead of being tempted by a phishing link.
+// 4. **Defender for Cloud Apps — App Governance** — the detective + preventive control: scores apps for rarity, reply-URL anomalies, and consent patterns, and can auto-disable risky apps.
+// 5. **User education** — pair with a quarterly phishing simulation that specifically uses OAuth consent dialogs, not just credential pages.
+//
+// ## References
+//
+// - [Investigate and remediate risky OAuth apps](https://learn.microsoft.com/en-us/defender-cloud-apps/investigate-risky-oauth)
+// - [Microsoft: Detect malicious OAuth applications](https://learn.microsoft.com/en-us/defender-cloud-apps/app-governance-detect-remediate-malicious-oauth-apps)
+// - [MITRE ATT&CK T1528 — Steal Application Access Token](https://attack.mitre.org/techniques/T1528/)
+// - [MITRE ATT&CK T1566.002 — Spearphishing Link](https://attack.mitre.org/techniques/T1566/002/)
+//
+// ## Source & attribution
+//
+// > Source: [reprise99/Sentinel-Queries — Azure Active Directory/OAuth-FirstTimeAppConsent.kql](https://github.com/reprise99/Sentinel-Queries/blob/main/Azure%20Active%20Directory/OAuth-FirstTimeAppConsent.kql) · MIT License
+
+let newusers=
+AuditLogs
+| where TimeGenerated > ago(365d) and TimeGenerated < ago(1d)
+| where OperationName in ("Add app role assignment to service principal","Add delegated permission grant")
+| extend Actor = tostring(parse_json(tostring(InitiatedBy.user)).userPrincipalName)
+| distinct Actor
+| join kind=rightanti (
+    AuditLogs
+    | where TimeGenerated > ago(1d)
+    | where OperationName in ("Add app role assignment to service principal","Add delegated permission grant")
+    | extend Actor = tostring(parse_json(tostring(InitiatedBy.user)).userPrincipalName)
+    | distinct Actor )
+    on Actor;
+let delegatedaccess=
+    AuditLogs
+    | where TimeGenerated > ago(1d)
+    | where OperationName has "Add delegated permission grant"
+    | extend x = tostring(parse_json(tostring(parse_json(tostring(TargetResources[0].modifiedProperties))[0].newValue)))
+    | extend PermissionsGranted = split(x, ' ')
+    | extend Actor = tostring(parse_json(tostring(InitiatedBy.user)).userPrincipalName)
+    | where Actor in (newusers)
+    | extend ServicePrincipalObjectId = tostring(TargetResources[1].id)
+    | extend Activity = "Delegated access added to application"
+    | project TimeGenerated, Activity, PermissionsGranted, ServicePrincipalObjectId, Actor;
+let appaccess=
+    AuditLogs
+    | where TimeGenerated > ago(1d)
+    | where OperationName has "Add app role assignment to service principal"
+    | extend x = tostring(parse_json(tostring(parse_json(tostring(TargetResources[0].modifiedProperties))[1].newValue)))
+    | extend PermissionsGranted = split(x, ' ')
+    | extend Actor = tostring(parse_json(tostring(InitiatedBy.user)).userPrincipalName)
+    | where Actor in (newusers)
+    | extend Activity = "Application access added to application"
+    | extend ServicePrincipalObjectId = tostring(TargetResources[1].id)
+    | project TimeGenerated, Activity, PermissionsGranted, ServicePrincipalObjectId, Actor;
+union delegatedaccess, appaccess

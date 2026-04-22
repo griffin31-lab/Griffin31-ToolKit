@@ -1,0 +1,108 @@
+// Name: Entra Directory Role Assignment (All Role Additions)
+// Description: Lists every directory-role membership addition in the tenant, excluding
+//              PIM-driven activations (Identity != 'MS-PIM'). This is the raw feed to
+//              build a "what privileges changed today" dashboard and to alert on the
+//              high-impact roles: Global Admin, Privileged Role Admin, Security Admin,
+//              Exchange Admin, User Admin.
+// MITRE ATT&CK: T1098.003 (Account Manipulation: Additional Cloud Roles),
+//               T1078.004 (Valid Accounts: Cloud Accounts)
+// Data Source: AuditLogs (Entra ID directory audit log)
+// Platform:    Microsoft Sentinel / Log Analytics
+// Time window: Default AuditLogs retention (14-30d)
+// Reference:   ./Entra-Role-Additions.md
+// Context:     Privilege escalation in M365 almost always routes through "Add member
+//              to role". Attackers who compromise an eligible PIM user often permanently
+//              assign themselves a role (skipping PIM time-boxing), or use an already-
+//              held helpdesk role to add themselves to a higher one.
+//
+// Recommended actions on hits:
+// - Confirm every assignment matches a ticket / change record
+// - For Global Admin additions: treat as high-severity and verify immediately
+// - Review the Actor's recent activity — same-day CA changes or SP additions raise risk
+// - For unauthorized assignments: remove the role, revoke sessions, investigate the actor
+//
+// ---------------------------------------------------------------------------
+// Extended context, background, tuning, and attribution
+// ---------------------------------------------------------------------------
+//
+// # Entra Directory Role Assignment (All Role Additions)
+//
+// <sub>[← Back to KQL index](../README.md)</sub>
+//
+// ## Why this hunt
+//
+// "Add member to role" is the audit event behind every privilege change in Entra. It fires when a user is assigned **any** directory role — Global Administrator, Exchange Administrator, User Administrator, Helpdesk Administrator, any of the 100+ built-ins, and any custom role.
+//
+// This is the highest-value AuditLogs operation for identity hunting because:
+//
+// - Real privilege escalation routes through it (attackers need roles to act)
+// - It is not buried in JSON nesting like Graph consents are — easy to parse
+// - Volume is manageable (most tenants see a few per day)
+//
+// Filtering out `Identity == 'MS-PIM'` removes the just-in-time activation noise (which is expected and auditable separately). What remains is **permanent** role assignments: long-lived privilege, the attacker's preferred shape.
+//
+// ## Expected output
+//
+// | Column | Meaning |
+// |---|---|
+// | `TimeGenerated` | When the role was assigned |
+// | `Role` | The directory role name |
+// | `userPrincipalName` | Who received the role |
+// | `Identity` | Who performed the assignment (UPN, app, or system) |
+//
+// ### Priority tiers
+//
+// Not every role is equal. Treat these as the alert tiers for this hunt:
+//
+// **P1 — immediate investigation**
+// - Global Administrator
+// - Privileged Role Administrator
+// - Privileged Authentication Administrator
+// - Application Administrator
+// - Cloud Application Administrator
+//
+// **P2 — same-day review**
+// - Security Administrator
+// - Exchange Administrator
+// - SharePoint Administrator
+// - Intune Administrator
+// - User Administrator
+// - Helpdesk Administrator
+//
+// **P3 — log and audit weekly**
+// - Reader-tier roles (Directory Readers, Reports Reader, Global Reader)
+// - Service-specific admins for services you don't use
+//
+// ## Tuning notes
+//
+// - **PIM assignments without MS-PIM identity:** if your org uses PIM for Groups, activations route differently. Validate the `Identity` field in your tenant before building detections.
+// - **Bulk assignments:** some tenants use scripted role assignment during onboarding — multiple entries from the same actor in seconds. Aggregate per actor-hour to avoid alert floods.
+// - **Noise reduction:** combine with first-time-actor pattern — alert only when the `Identity` UPN has never assigned that specific role before.
+// - **Complement:** pair with [Service-Principal-Added-To-Role](../oauth/Service-Principal-Added-To-Role.md) for the workload-identity half of privilege hunting.
+//
+// ## Recommended hardening
+//
+// 1. **Privileged Identity Management (PIM)** — make every high-impact role eligible rather than permanent. Activation requires MFA and justification, creates audit, and is time-boxed.
+// 2. **Access Reviews** — quarterly for all P1 and P2 roles. Revokes unused privilege before an attacker inherits it.
+// 3. **Restrict Global Admin count** to 2–5 named users + break-glass. Monitor break-glass usage separately (see [Break-Glass-Account-Signin](./Break-Glass-Account-Signin.md)).
+// 4. **Separation of duties** — no one is simultaneously Global Admin and the person who approves their PIM activations.
+// 5. **Schedule this as an analytic rule** — alert on any P1 addition outside a change window; daily digest on P2; weekly summary on P3.
+//
+// ## References
+//
+// - [Entra built-in roles reference](https://learn.microsoft.com/en-us/entra/identity/role-based-access-control/permissions-reference)
+// - [Privileged Identity Management overview](https://learn.microsoft.com/en-us/entra/id-governance/privileged-identity-management/pim-configure)
+// - [MITRE ATT&CK T1098.003 — Additional Cloud Roles](https://attack.mitre.org/techniques/T1098/003/)
+//
+// ## Source & attribution
+//
+// > Source: [Bert-JanP/Hunting-Queries-Detection-Rules — Azure Active Directory/ADRoleAdditions.md](https://github.com/Bert-JanP/Hunting-Queries-Detection-Rules/blob/main/Azure%20Active%20Directory/ADRoleAdditions.md) · BSD-3-Clause License
+
+AuditLogs
+| where OperationName == 'Add member to role'
+// Remove this filter if you also want to see PIM just-in-time activations
+| where Identity != 'MS-PIM'
+| extend RoleLine = tostring(extract(@'Role.DisplayName(.*?)"}', 1, tostring(TargetResources)))
+| extend Role = tostring(extract(@'newValue":"\\"(.*?)\\', 1, RoleLine))
+| extend userPrincipalName = parse_json(TargetResources).[0].userPrincipalName
+| project TimeGenerated, Role, OperationName, userPrincipalName, Identity

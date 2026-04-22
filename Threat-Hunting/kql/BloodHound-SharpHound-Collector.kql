@@ -1,0 +1,102 @@
+// Name: BloodHound / SharpHound Collector Execution
+// Description: Detects the BloodHound / SharpHound AD-enumeration collectors running on
+//              a device. Matches against known PowerShell cmdlet names and SharpHound
+//              command-line arguments.
+// MITRE ATT&CK: T1087.002 (Account Discovery: Domain Account),
+//               T1069.002 (Permission Groups Discovery: Domain Groups),
+//               T1482 (Domain Trust Discovery),
+//               T1087.004 (Account Discovery: Cloud Account) — for AzureHound variant
+// Data Source: DeviceProcessEvents (Microsoft Defender for Endpoint)
+// Platform:    Microsoft Defender XDR / Microsoft Sentinel
+// Time window: 7 days
+// Reference:   ./BloodHound-SharpHound-Collector.md
+// Context:     BloodHound maps the entire attack-path graph of an AD domain. An attacker
+//              runs SharpHound early in an intrusion to find the shortest path from their
+//              current foothold to Domain Admin. Red teams use it legitimately — confirm
+//              an approved engagement before triaging.
+//
+// Recommended actions on hits:
+// - Confirm whether there is an authorized red-team / pentest engagement in flight
+// - If unexpected: isolate the device, preserve the collected .zip output
+// - Review the user account's recent logons — attacker likely has domain user creds
+// - Check Defender for Identity for lateral-movement alerts following the collection
+//
+// ---------------------------------------------------------------------------
+// Extended context, background, tuning, and attribution
+// ---------------------------------------------------------------------------
+//
+// # BloodHound / SharpHound Collector Execution
+//
+// <sub>[← Back to KQL index](../README.md)</sub>
+//
+// ## Why this hunt
+//
+// BloodHound builds a graph database of every user, group, computer, ACL, and trust relationship in an Active Directory (or Entra ID / Azure) environment, then runs graph queries to find the shortest path to Domain Admin (or Global Administrator). It is the single most impactful reconnaissance tool in the attacker toolkit — every mature intrusion operator runs it.
+//
+// The collection component — **SharpHound** (on-prem AD, C#/PowerShell) and **AzureHound** (Entra ID / Azure, Go) — is what lands on the endpoint. If the collector runs unexpectedly, a knowledgeable attacker is planning lateral movement and privilege escalation.
+//
+// This hunt uses the command-line argument patterns the collectors expose (`-collectionMethod`, `Invoke-BloodHound`, `-c All`, `SessionLoopDelay`) rather than file hashes, which change with every build.
+//
+// ## Expected output
+//
+// | Column | Meaning |
+// |---|---|
+// | `FileName` | Often `powershell.exe` (SharpHound.ps1), direct `SharpHound.exe`, or `AzureHound.exe` |
+// | `ProcessCommandLine` | Contains the collection method flag and domain target |
+// | `InitiatingProcessCommandLine` | Parent — may reveal how the collector got onto the device (e.g., downloaded from a C2) |
+// | `AccountUpn` | The compromised user account with domain-read rights |
+//
+// A **legitimate** hit comes from an authorized red-team / pentest / tiering audit. Every other hit is an active intrusion.
+//
+// ## Tuning notes
+//
+// - **False positives from security teams' own tooling** — internal AD hygiene projects may legitimately run SharpHound. Maintain an allow-list of known security-admin user accounts.
+// - If you run BloodHound Community Edition operationally, add those host names to an exclusion list
+// - The `AzureHound` variant signals cloud-directory enumeration rather than on-prem AD — consider also running the companion Graph API query in `kql/exfiltration/Unusual-GraphAPI-UserAgent.kql`
+//
+// ## Recommended hardening
+//
+// 1. **Microsoft Defender for Identity** — alerts on the network-level LDAP enumeration SharpHound generates, independent of the endpoint detection
+// 2. **Tiered administrative model** — SharpHound only finds useful attack paths if your privileged accounts are reachable from Tier 1/2 workstations. A clean Tier 0 isolation neutralizes most findings
+// 3. **Local Administrator Password Solution (LAPS)** — eliminates shared local admin passwords that BloodHound paths often abuse
+// 4. **Restrict which hosts can run PowerShell** with script block logging, constrained language mode, and WDAC for privileged jumpboxes
+// 5. **Review your own BloodHound output periodically** — "attack paths" from regular workstations to Domain Admin should be zero
+// 6. **Disable legacy protocols** — `NTLMv1`, `SMBv1`, unconstrained delegation — that BloodHound attack paths typically exploit
+//
+// ## Source & attribution
+//
+// Query adapted from two MIT-licensed sources:
+// - **Bert-JanP/Hunting-Queries-Detection-Rules** — `Defender For Endpoint/BloodHoundProcessDetection.md`
+// - **Bert-JanP/Hunting-Queries-Detection-Rules** — `Graph API/AzureHound.md` (for the AzureHound / cloud indicator list)
+//
+// Prior art: RedCanary Threat Detection Report — BloodHound coverage.
+//
+// ## References
+//
+// - [MITRE ATT&CK T1087.002 — Account Discovery: Domain Account](https://attack.mitre.org/techniques/T1087/002/)
+// - [MITRE ATT&CK T1482 — Domain Trust Discovery](https://attack.mitre.org/techniques/T1482/)
+// - [BloodHound Enterprise](https://bloodhoundenterprise.io/)
+// - [SpecterOps BloodHound Community Edition](https://github.com/SpecterOps/BloodHound)
+// - [RedCanary: BloodHound threat profile](https://redcanary.com/threat-detection-report/threats/bloodhound/)
+
+let BloodHoundIndicators = dynamic([
+    "-collectionMethod",
+    "invoke-bloodhound",
+    "get-bloodHounddata",
+    "sharphound.exe",
+    "sharphound.ps1",
+    "azurehound.exe",
+    "Invoke-AzureHound",
+    "--CollectionMethods",
+    "-c All,LoggedOn",
+    "-c DCOnly",
+    "SessionLoopDelay"
+]);
+DeviceProcessEvents
+| where Timestamp > ago(7d)
+| where ProcessCommandLine has_any (BloodHoundIndicators)
+   or  FileName in~ ("SharpHound.exe", "AzureHound.exe")
+| project Timestamp, DeviceName, AccountUpn,
+          FileName, ProcessCommandLine,
+          InitiatingProcessFileName, InitiatingProcessCommandLine, InitiatingProcessFolderPath
+| sort by Timestamp desc

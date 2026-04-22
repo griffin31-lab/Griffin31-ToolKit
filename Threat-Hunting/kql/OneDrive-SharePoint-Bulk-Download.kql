@@ -1,0 +1,111 @@
+// Name: OneDrive / SharePoint Bulk Download Anomaly
+// Description: Uses time-series anomaly detection on the OfficeActivity table to
+//              surface users whose download volume from OneDrive or SharePoint
+//              deviates significantly above their own baseline. Targets the
+//              "log in, grab everything, leave" exfil pattern.
+// MITRE ATT&CK: T1567.002 (Exfiltration to Cloud Storage),
+//               T1530 (Data from Cloud Storage Object),
+//               T1213.002 (Data from Information Repositories: SharePoint)
+// Data Source: OfficeActivity (Unified Audit Log ingestion in Sentinel)
+// Platform:    Microsoft Sentinel
+// Time window: 21 days baseline, 1 hour bins
+// Reference:   ./OneDrive-SharePoint-Bulk-Download.md
+// Context:     After token theft or password compromise, attackers frequently
+//              perform large, rapid pull-downs from OneDrive / SharePoint. Volume-
+//              over-baseline anomaly detection catches these even when the user
+//              and location look individually legitimate.
+//
+// Recommended actions on hits:
+// - Correlate against SigninLogs — was the download session preceded by an unfamiliar IP / device?
+// - Pull the user's SharePoint activity list from the UAL to see which files / sites were touched
+// - If suspicious: revoke refresh tokens, force password reset, session-kill from Entra
+// - Check whether affected files carry sensitivity labels — if yes, involve Purview / legal
+//
+// ---------------------------------------------------------------------------
+// Extended context, background, tuning, and attribution
+// ---------------------------------------------------------------------------
+//
+// # OneDrive / SharePoint Bulk Download Anomaly
+//
+// <sub>[← Back to KQL index](../README.md)</sub>
+//
+// ## Why this hunt
+//
+// When an identity is compromised — whether by phishing, token theft, or consent phishing — the single highest-value action available to the attacker is to pull down everything the user can see in OneDrive and SharePoint. This is a one-shot smash-and-grab: large download volume, short time window, from an otherwise-valid session.
+//
+// Static thresholds don't work here — one user's "a lot of downloads" is another user's normal Monday. The approach is **per-user anomaly detection over a 3-week baseline**, flagging hours in which a specific user downloaded far more than they typically do.
+//
+// ## Expected output
+//
+// | Column | Meaning |
+// |---|---|
+// | `UserId` | The account whose download volume anomalously spiked |
+// | `BinTime` | The 1-hour bin in which the anomaly occurred |
+// | `AnomalyDownloads` | Count in that bin |
+// | `ClientIP`, `UserAgent` | Enrichment from individual UAL events — unfamiliar values here strengthen the signal |
+// | `OfficeWorkload` | `SharePoint` or `OneDrive` |
+// | `Site_Url` / `SourceFileName` | Samples of what was accessed |
+//
+// The join returns one row per anomalous event with all the forensic context, letting an analyst quickly scan for:
+// - Unknown IP ranges
+// - Uncommon user agents (scripting tools, not Office or a browser)
+// - Access to sites the user does not normally touch
+// - File types of interest (spreadsheets, PDFs, source code)
+//
+// ## Tuning notes
+//
+// - `sensitivity = 2` is aggressive. Lower to `1.5` for more anomalies (more noise), raise to `3` for a quieter feed.
+// - `threshold = 100` filters out tiny-absolute anomalies. Raise this for very large tenants.
+// - The `series_decompose_anomalies` KQL function needs at least a few bins of history per user — brand-new accounts will not trip it
+// - The join fans out one anomaly to many UAL rows; consider `summarize` before `join` if volume is a concern in very large tenants
+// - Also consider joining `SigninLogs` on `UserId` and `ClientIP` to correlate with risky sign-ins
+//
+// ## Recommended hardening
+//
+// 1. **Conditional Access session control** — when a user signs in from an unmanaged device, route through MCAS session proxy and block or monitor download
+// 2. **Defender for Cloud Apps "Mass Download" policy** — out-of-the-box policy for exactly this pattern, alerts above a configurable threshold
+// 3. **Restrict anonymous / external sharing** by default at the tenant level
+// 4. **Sensitivity labels + auto-labeling** — so downloads of sensitive documents trigger higher-sensitivity alerts
+// 5. **Token Protection in Conditional Access** — binds tokens to the originating device, breaking stolen-cookie replay which is the common prelude to bulk download
+// 6. **Block legacy auth** and **require phishing-resistant MFA** — eliminates the most common prior step (password compromise)
+// 7. **Device compliance required for SharePoint/OneDrive access** — forces attackers onto a controlled device
+//
+// ## Source & attribution
+//
+// Query adapted from **reprise99/Sentinel-Queries** — `Office 365/OfficeActivity-AnomalousDownloadsfromGuests.kql` (MIT). The original targets guest-account downloads; this variant removes the `#EXT#` filter so any user's anomaly fires, and adds a join back to raw UAL events for forensic context.
+//
+// ## References
+//
+// - [MITRE ATT&CK T1567.002 — Exfiltration to Cloud Storage](https://attack.mitre.org/techniques/T1567/002/)
+// - [MITRE ATT&CK T1213.002 — Data from Information Repositories: SharePoint](https://attack.mitre.org/techniques/T1213/002/)
+// - [Microsoft Learn: Mass download by a user policy (Defender for Cloud Apps)](https://learn.microsoft.com/en-us/defender-cloud-apps/anomaly-detection-policy)
+// - [Microsoft Learn: Token Protection in Conditional Access](https://learn.microsoft.com/en-us/entra/identity/conditional-access/concept-token-protection)
+
+let startdate  = 21d;
+let enddate    = 1d;
+let timeframe  = 1h;
+let sensitivity = 2;      // lower = more anomalies detected
+let threshold   = 100;    // minimum downloads in a bin to qualify as "bulk"
+let outlierusers =
+    OfficeActivity
+    | where TimeGenerated between (startofday(ago(startdate)) .. startofday(ago(enddate)))
+    | where Operation in ("FileSyncDownloadedFull", "FileDownloaded", "FileAccessed")
+    | make-series Downloads = count()
+               on TimeGenerated from startofday(ago(startdate)) to startofday(ago(enddate)) step timeframe
+               by UserId
+    | extend outliers = series_decompose_anomalies(Downloads, sensitivity)
+    | mv-expand TimeGenerated, Downloads, outliers
+    | where outliers == 1 and toint(Downloads) > threshold
+    | project UserId = tostring(UserId),
+              BinTime = todatetime(TimeGenerated),
+              AnomalyDownloads = toint(Downloads);
+outlierusers
+| join kind=inner (
+    OfficeActivity
+    | where TimeGenerated > startofday(ago(startdate))
+    | where Operation in ("FileSyncDownloadedFull", "FileDownloaded", "FileAccessed")
+    | project UAL_Time = TimeGenerated, UserId, ClientIP, UserAgent, OfficeWorkload, Site_Url, SourceFileName
+) on UserId
+| where UAL_Time between (BinTime .. (BinTime + timeframe))
+| project BinTime, UserId, AnomalyDownloads, UAL_Time, ClientIP, UserAgent, OfficeWorkload, Site_Url, SourceFileName
+| sort by BinTime desc, UserId asc

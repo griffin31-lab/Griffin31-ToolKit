@@ -1,0 +1,112 @@
+// Name: Break-Glass / Emergency Account Sign-In
+// Description: Alerts on any sign-in by a designated break-glass (emergency access)
+//              account. Break-glass accounts are excluded from Conditional Access and
+//              are meant to be used only when all other Global Admins are locked out.
+//              Any usage should be an incident in itself — verified against a real
+//              emergency or flagged as compromise.
+// MITRE ATT&CK: T1078.004 (Valid Accounts: Cloud Accounts),
+//               T1098 (Account Manipulation)
+// Data Source: SigninLogs (Entra ID)  /  AADSignInEventsBeta (Advanced Hunting)
+// Platform:    Microsoft Sentinel / Log Analytics  (also Advanced Hunting)
+// Time window: Real-time (any usage at all)
+// Reference:   ./Break-Glass-Account-Signin.md
+// Context:     Microsoft recommends every tenant have 2 break-glass accounts with
+//              cloud-only passwords stored offline, excluded from CA, and monitored.
+//              These accounts bypass every preventive control — so detection is the
+//              only remaining layer. If an attacker gets a break-glass credential they
+//              have effectively unrestricted access.
+//
+// Recommended actions on hits:
+// - Verify the sign-in against an active P1 incident ticket / on-call record
+// - If not tied to a real emergency: treat as confirmed Global Admin compromise
+// - Reset the break-glass password (offline vault), regenerate the vault copy
+// - Rotate any secrets / keys this account could have touched
+// - Review session for changes to CA policies, PIM, or other break-glass accounts
+//
+// !!! UPDATE THE UserDisplayName VALUE BELOW BEFORE DEPLOYING !!!
+//
+// ---------------------------------------------------------------------------
+// Extended context, background, tuning, and attribution
+// ---------------------------------------------------------------------------
+//
+// # Break-Glass / Emergency Account Sign-In
+//
+// <sub>[← Back to KQL index](../README.md)</sub>
+//
+// ## Why this hunt
+//
+// Break-glass accounts — also called emergency access accounts — are a Microsoft-recommended design pattern:
+//
+// - 2 cloud-only accounts with Global Administrator role
+// - Excluded from **all** Conditional Access policies
+// - Passwords stored in a physical vault, never used for daily operations
+// - MFA methods that do not depend on a mobile device (FIDO2 keys in an offline safe)
+// - Used only to recover the tenant when the normal admin path is broken (CA misconfiguration, MFA provider outage, tenant-wide lockout)
+//
+// The whole point of a break-glass account is that it **bypasses every preventive control**. This is a deliberate architectural choice: in an emergency you need a way in. But it means detection is the last remaining safety net. If an attacker gets a break-glass credential, Conditional Access, risk-based policies, and session controls all give way.
+//
+// Therefore: every single sign-in to a break-glass account must be noticed, logged, and explained.
+//
+// ## Deployment
+//
+// 1. Open `Break-Glass-Account-Signin.kql`.
+// 2. Replace `"Input display name of account here"` with the actual DisplayName of your break-glass account (e.g., `"BreakGlass-01"`).
+// 3. Promote to a Sentinel scheduled analytic rule with severity = High.
+// 4. Add a duplicate rule pointing at the second break-glass account.
+// 5. Test by signing in with the break-glass account once (you should, every 90 days, to verify the password still works) and confirm the alert fires.
+//
+// ## Expected output
+//
+// Any row at all is worth investigating. Columns:
+//
+// | Column | Meaning |
+// |---|---|
+// | `UserDisplayName` | Your break-glass account name |
+// | `Location`, `IPAddress` | Where the sign-in came from |
+// | `TimeGenerated` | When |
+// | `AppDisplayName` | What the account signed into |
+// | `DeviceDetail` | Device context |
+//
+// ### Triage checklist
+//
+// When this fires:
+//
+// 1. Is there an active P1 incident ticket with break-glass usage approved? If yes, log and move on.
+// 2. Was the sign-in from a known IT admin workstation or the break-glass vault room? Verify.
+// 3. Did the account touch CA policies, role assignments, or the other break-glass account in the same session? (Look up AuditLogs `InitiatedBy.user.userPrincipalName == BreakGlassUPN`.)
+// 4. If anything is unexplained: treat as tenant-level compromise. Reset the break-glass password via the offline vault process, rotate every secret the account could have touched, review every CA policy change in the last 30 days.
+//
+// ## Tuning notes
+//
+// - **Noise:** approximately zero hits in a healthy tenant. This is a high-severity / low-volume detection by design.
+// - **Regular tests:** schedule a 90-day exercise where an admin signs in with the break-glass account to prove the workflow still works. File a ticket first so the detection is explained.
+// - **Monitor both accounts** separately — each gets its own analytic rule.
+//
+// ## Recommended hardening (break-glass design)
+//
+// 1. **Two accounts**, different vault locations, different MFA devices.
+// 2. **Cloud-only** — never synced from on-prem AD.
+// 3. **FIDO2 keys** in the vault; no SMS, no Authenticator on a daily-use phone.
+// 4. **Exclude from CA** — but only after confirming this detection is live.
+// 5. **90-day password verification cadence** — known-good state.
+// 6. **Quarterly tabletop** — simulate the tenant being locked out and time the break-glass recovery.
+//
+// ## References
+//
+// - [Microsoft: Manage emergency access accounts](https://learn.microsoft.com/en-us/entra/identity/role-based-access-control/security-emergency-access)
+// - [MITRE ATT&CK T1078.004 — Cloud Accounts](https://attack.mitre.org/techniques/T1078/004/)
+//
+// ## Source & attribution
+//
+// > Source: [Bert-JanP/Hunting-Queries-Detection-Rules — Azure Active Directory/MonitorCloudBreakGlassAccount.md](https://github.com/Bert-JanP/Hunting-Queries-Detection-Rules/blob/main/Azure%20Active%20Directory/MonitorCloudBreakGlassAccount.md) · BSD-3-Clause License (original contribution by [erikgruetter](https://github.com/erikgruetter))
+
+SigninLogs
+| where UserDisplayName == "Input display name of account here"
+| project
+    UserDisplayName,
+    Location,
+    IPAddress,
+    TimeGenerated,
+    AppDisplayName,
+    DeviceDetail,
+    UserPrincipalName

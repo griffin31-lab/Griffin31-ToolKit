@@ -1,0 +1,139 @@
+// Name: Self-Service Password Reset Followed by Risky Sign-In (Within 2h)
+// Description: Joins successful self-service password reset events to medium/high-risk
+//              Entra ID Protection sign-ins for the same user within a 2-hour window.
+//              Catches the classic "attacker socially engineers helpdesk or the user,
+//              resets the password via SSPR, then signs in" takeover pattern.
+// MITRE ATT&CK: T1098 (Account Manipulation),
+//               T1556.006 (Modify Authentication Process: MFA),
+//               T1078.004 (Valid Accounts: Cloud Accounts)
+// Data Source: AuditLogs + SigninLogs (Entra ID)
+// Platform:    Microsoft Sentinel / Log Analytics
+// Time window: 7 days, correlated pairs within 2 hours
+// Reference:   ./SSPR-Followed-By-Risky-Signin.md
+// Context:     Scattered Spider and multiple BEC operators are documented socially
+//              engineering helpdesk staff into resetting user passwords / MFA methods
+//              so SSPR can complete. The reset itself looks legitimate (the user's
+//              own account does it), but the sign-in minutes later comes from attacker
+//              infrastructure — and Entra ID Protection usually catches that as risky.
+//              This query joins the two so you see the whole chain instead of two
+//              unrelated-looking events.
+//
+// Recommended actions on hits:
+// - Contact the user out-of-band — did they reset their own password?
+// - Review the helpdesk ticket log for MFA-reset requests at the same time
+// - If social engineering confirmed: revoke sessions, re-reset password + MFA, audit
+//   the user's inbox rules, mail folder counts, Graph activity for exfil
+// - Escalate to a helpdesk phishing response playbook — the attacker may target others
+//
+// ---------------------------------------------------------------------------
+// Extended context, background, tuning, and attribution
+// ---------------------------------------------------------------------------
+//
+// # Self-Service Password Reset Followed by Risky Sign-In (Within 2h)
+//
+// <sub>[← Back to KQL index](../README.md)</sub>
+//
+// ## Why this hunt
+//
+// The helpdesk-phishing → SSPR takeover chain has been the signature move of several high-profile threat actors:
+//
+// - **Scattered Spider** (UNC3944 / Octo Tempest) built a reputation calling internal helpdesks, impersonating employees, and persuading IT to reset passwords or MFA methods.
+// - Multiple BEC operators use the same approach against executive assistants and finance staff.
+// - The entry is cheap: one phone call. The result is a clean, CA-compliant sign-in from the attacker's device.
+//
+// The attack shape:
+//
+// 1. Attacker gathers target info (LinkedIn, breached data, employee directory).
+// 2. Calls the helpdesk, impersonates the user, creates a pretext ("locked out", "new phone").
+// 3. Helpdesk resets the password and/or MFA method.
+// 4. Attacker signs in from their infrastructure — still from an unfamiliar country/device, so Entra ID Protection flags it as **medium/high risk**.
+//
+// Either half of the chain in isolation is inconclusive:
+//
+// - SSPR is used legitimately every day.
+// - Risky sign-ins happen to real users every day.
+//
+// **The correlation** — same user, SSPR completion followed by a medium-or-high-risk sign-in within 2 hours — is the high-confidence signal. This query joins AuditLogs → SigninLogs on UserPrincipalName and filters to pairs inside the 2-hour window.
+//
+// ## Expected output
+//
+// | Column | Meaning |
+// |---|---|
+// | `PasswordResetTime` | When the SSPR completed |
+// | `RiskTime` | When the risky sign-in happened |
+// | `TimeBetweenEvents` | Minutes between the two (≤ 120) |
+// | `UserPrincipalName` | The user |
+// | `IPAddress`, `Location`, `UserAgent` | Source of the risky sign-in |
+// | `ResultType` | 0 or one of the MFA-satisfied success codes |
+//
+// ### Red flags
+//
+// - Country / ISP combination the user has never used before
+// - User agent is a known attacker toolkit (EvilProxy, Storm-1811 proxies)
+// - Same helpdesk agent handled multiple SSPR events for different users in the same window — helpdesk compromise or social engineering spree
+// - User's mailbox gained an inbox rule or forwarding destination within an hour of the sign-in (BEC)
+//
+// ## Tuning notes
+//
+// - **Success codes list:** the `successCodes` dynamic array includes not only 0 but also codes like `50074` (MFA required) and `50125` (password change required). These map to cases where the session effectively completed for the attacker but included an extra step — see the list in the query header.
+// - **Risk level filter:** keeping only `high` and `medium` cuts volume while retaining most true positives. Include `low` if you run wider hunts with more analyst capacity.
+// - **2-hour window:** catches the common fast takeover. Widen to 6 hours for less noisy signals; narrow to 30 minutes for the strongest ones.
+// - **Helpdesk-assisted resets:** this query targets user-initiated SSPR. To catch helpdesk-initiated resets specifically, add `OperationName == "Reset user password"` (admin-initiated) and compare to the same RiskLevelDuringSignIn window.
+//
+// ## Recommended hardening
+//
+// 1. **Helpdesk verification protocol** — require **video call** + manager callback for any MFA reset. Do not permit phone-only verification.
+// 2. **Authenticator Lite / TAP codes** for MFA resets — push to the user's existing device, not a method the attacker controls.
+// 3. **FIDO2 keys for privileged users** — cannot be reset over the phone.
+// 4. **Risk-based CA** — any sign-in with `RiskState = atRisk` requires re-MFA + compliant device.
+// 5. **Monitor helpdesk agents** as privileged users — their access to the user-reset blade is privileged-equivalent.
+//
+// ## References
+//
+// - [Microsoft Threat Intelligence: Octo Tempest / Scattered Spider](https://www.microsoft.com/en-us/security/blog/2023/10/25/octo-tempest-crosses-boundaries-to-facilitate-extortion-encryption-and-destruction/)
+// - [CISA advisory: Scattered Spider](https://www.cisa.gov/news-events/cybersecurity-advisories/aa23-320a)
+// - [MITRE ATT&CK T1556.006 — Modify Authentication Process: MFA](https://attack.mitre.org/techniques/T1556/006/)
+// - [MITRE ATT&CK T1098 — Account Manipulation](https://attack.mitre.org/techniques/T1098/)
+//
+// ## Source & attribution
+//
+// > Source: [reprise99/Sentinel-Queries — Azure Active Directory/Identity-SSPRfollowedbyRiskySignin.kql](https://github.com/reprise99/Sentinel-Queries/blob/main/Azure%20Active%20Directory/Identity-SSPRfollowedbyRiskySignin.kql) · MIT License
+
+let successCodes = dynamic([0, 50055, 50057, 50155, 50105, 50133, 50005, 50076, 50079, 50173, 50158, 50072, 50074, 53003, 53000, 53001, 50129]);
+AuditLogs
+| where TimeGenerated > ago(7d)
+| where OperationName == "Reset password (self-service)"
+| where ResultDescription == "Successfully completed reset."
+| extend UserPrincipalName = tostring(TargetResources[0].userPrincipalName)
+| project-rename PasswordResetTime = TimeGenerated
+| project UserPrincipalName, PasswordResetTime, OperationName
+| join kind=inner(
+    SigninLogs
+    | where TimeGenerated > ago(7d)
+    | where ResultType in (successCodes)
+    | where RiskLevelDuringSignIn in ("high", "medium")
+    | project
+        RiskTime = TimeGenerated,
+        UserPrincipalName,
+        ResultType,
+        ResultDescription,
+        AppDisplayName,
+        IPAddress,
+        Location,
+        UserAgent
+    )
+    on UserPrincipalName
+| extend TimeBetweenEvents = datetime_diff('minute', PasswordResetTime, RiskTime)
+| project-reorder
+    PasswordResetTime,
+    RiskTime,
+    TimeBetweenEvents,
+    UserPrincipalName,
+    OperationName,
+    ResultType,
+    ResultDescription,
+    AppDisplayName,
+    IPAddress,
+    Location,
+    UserAgent
+| where TimeBetweenEvents <= 120

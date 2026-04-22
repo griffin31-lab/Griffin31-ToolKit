@@ -1,0 +1,126 @@
+// Name: Domain Federation Trust Settings Modified (Golden SAML precursor)
+// Description: Detects 'Set federation settings on domain' and 'Set domain authentication'
+//              (transition to Federated). Modification of federation is the first step of
+//              a Golden SAML / AADIntMonkey persistence attack — attackers replace or
+//              add a federation trust so they can mint tokens for any user in the domain.
+// MITRE ATT&CK: T1556    (Modify Authentication Process),
+//               T1078.004 (Valid Accounts: Cloud Accounts),
+//               T1098    (Account Manipulation),
+//               T1606.002 (Forge Web Credentials: SAML Tokens)
+// Data Source: AuditLogs (Entra ID directory audit)
+// Platform:    Microsoft Sentinel / Log Analytics
+// Time window: 1 day
+// Reference:   ./Federation-Trust-Modified.md
+// Context:     Famous Solorigate / Golden SAML attack chain — attacker modifies or
+//              adds a trusted federation, injecting their signing certificate; then
+//              any on-prem or cloud auth federated through that issuer becomes
+//              attacker-controlled.
+//
+// Recommended actions on hits:
+// - Treat as Critical severity — this is an identity-infrastructure level event
+// - Verify the change is part of an approved federation migration / ADFS to Entra plan
+// - If unauthorized: remove the federation (Remove-MgDomainFederationConfiguration) immediately
+// - Rotate all tokens and force password reset for the entire federated domain
+// - Engage Microsoft Incident Response or equivalent; consider this a tenant-level event
+//
+// ---------------------------------------------------------------------------
+// Extended context, background, tuning, and attribution
+// ---------------------------------------------------------------------------
+//
+// # Domain Federation Trust Settings Modified
+//
+// <sub>[← Back to KQL index](../README.md)</sub>
+//
+// > Source: [Azure-Sentinel / Solutions/Microsoft Entra ID/Analytic Rules/ADFSDomainTrustMods.yaml](https://github.com/Azure/Azure-Sentinel/blob/master/Solutions/Microsoft%20Entra%20ID/Analytic%20Rules/ADFSDomainTrustMods.yaml) · MIT License
+//
+// ## Why this hunt
+//
+// This is one of the highest-severity detection rules in the Microsoft Entra ecosystem. Modification of domain federation settings is the **precursor to Golden SAML** and equivalent attacks that compromise the identity fabric itself:
+//
+// 1. Attacker compromises a Global Admin (often via token theft, social engineering helpdesk, or session hijacking)
+// 2. Runs `Set-MsolDomainFederationSettings` / `Update-MgDomainFederationConfiguration` — or its Graph / portal equivalent — to modify the federation trust
+// 3. Injects their own signing certificate as trusted issuer OR points federation to an attacker-controlled endpoint
+// 4. **Every federated user in that domain can now be silently impersonated** — the attacker signs arbitrary SAML tokens that Entra will trust
+//
+// This is the primitive Mandiant documented as **Golden SAML** during the SolarWinds / Solorigate investigation. It has since been reproduced by multiple open-source tools (AADInternals being the best-known). The attack is almost impossible to unwind without a full tenant rebuild once it's live.
+//
+// The query catches two distinct operations:
+//
+// - `Set federation settings on domain` — direct change to an existing federated domain's trust
+// - `Set domain authentication` transitioning a domain to `Federated` — the conversion step
+//
+// ## Expected output
+//
+// | Column | What it tells you |
+// |---|---|
+// | `TimeGenerated` | When the change was made |
+// | `OperationName` | `Set federation settings on domain` or `Set domain authentication` |
+// | `InitiatingUserOrApp` | Actor UPN or initiating app display name |
+// | `InitiatingIpAddress` / `UserAgent` | Origin of the change |
+// | `targetDisplayName` | Which property of the federation was modified |
+// | `Result` | Success / failure — **failures still matter** (attempted Golden SAML) |
+// | `AADOperationType` | Additional Microsoft classification |
+//
+// Zero tolerance for unexplained hits. A legitimate federation change is a scheduled, documented project — not a spontaneous event.
+//
+// ## Tuning notes
+//
+// - **Include failures** — the rule intentionally does NOT filter `Result =~ "success"` because attempted-but-failed federation modifications are also incident-worthy
+// - **User-Agent signal** — AADInternals / open-source Golden-SAML tools often have identifying user agents — surface them explicitly
+// - **Planned change exclusion** — legitimate ADFS-to-Entra migrations are the only normal source of `Set domain authentication`; use change-management window + initiator allow-list, but never suppress entirely (alert on anomaly within the window)
+// - **Multiple federation events in a row** — hit-count analytics on this query across a 1-hour window is extremely high-signal
+// - **Pair with downstream SAML sign-ins** — after any hit, pivot to `SigninLogs | where FederatedCredentialId != ""` for the following 48h and look for anomalies
+//
+// ## Recommended hardening
+//
+// 1. **Migrate off ADFS** — Entra ID native auth removes the on-prem federation attack surface entirely
+// 2. **If federation is required, Privilege-Gate the Global Admin role** — PIM + approval + phishing-resistant MFA for all GA / Hybrid Identity Admin assignments
+// 3. **Monitor the Entra Connect / ADFS server itself** — compromise of the ADFS server is the usual precursor to federation modification; Defender for Identity or equivalent EDR is mandatory
+// 4. **Token signing certificate rotation** — document + regularly rotate ADFS token signing certs
+// 5. **Microsoft Incident Response retainer** — given the blast radius, have a pre-negotiated IR engagement ready
+// 6. **Tenant restoration planning** — have a documented runbook for federation-compromise recovery (it's not a technical fix, it's a full tenant-identity rebuild)
+// 7. **Immutable audit log** — forward `AuditLogs` to an external, immutable store so Golden-SAML-abuse evidence survives tenant rebuild
+//
+// ## References
+//
+// - [MITRE ATT&CK T1556 — Modify Authentication Process](https://attack.mitre.org/techniques/T1556/)
+// - [MITRE ATT&CK T1606.002 — Forge Web Credentials: SAML Tokens](https://attack.mitre.org/techniques/T1606/002/)
+// - [Mandiant: Detecting Golden SAML](https://www.mandiant.com/resources/blog/detecting-microsoft-365-azure-active-directory-backdoors)
+// - [CISA advisory AA21-077A — SolarWinds](https://www.cisa.gov/news-events/cybersecurity-advisories/aa21-077a)
+// - [Microsoft Learn: Federation settings](https://learn.microsoft.com/entra/identity/hybrid/connect/how-to-connect-fed-management)
+
+(union isfuzzy=true
+  (
+  AuditLogs
+  | where OperationName =~ "Set federation settings on domain"
+  | mv-expand TargetResources
+  | extend modifiedProperties = parse_json(TargetResources).modifiedProperties
+  | mv-expand modifiedProperties
+  | extend targetDisplayName = tostring(parse_json(modifiedProperties).displayName)
+  ),
+  (
+  AuditLogs
+  | where OperationName =~ "Set domain authentication"
+  | mv-expand TargetResources
+  | extend modifiedProperties = parse_json(TargetResources).modifiedProperties
+  | mv-expand modifiedProperties
+  | mv-apply Property = modifiedProperties on (
+        where Property.displayName =~ "LiveType"
+        | extend targetDisplayName = tostring(Property.displayName),
+                 NewDomainValue = tostring(Property.newValue)
+    )
+  | where NewDomainValue has "Federated"
+  )
+)
+| mv-apply AdditionalDetail = AdditionalDetails on (
+    where AdditionalDetail.key =~ "User-Agent"
+    | extend UserAgent = tostring(AdditionalDetail.value)
+  )
+| extend InitiatingUserOrApp = iff(isnotempty(InitiatedBy.user.userPrincipalName),tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName))
+| extend InitiatingAppName = tostring(InitiatedBy.app.displayName)
+| extend InitiatingAppServicePrincipalId = tostring(InitiatedBy.app.servicePrincipalId)
+| extend InitiatingUserPrincipalName = tostring(InitiatedBy.user.userPrincipalName)
+| extend InitiatingAadUserId = tostring(InitiatedBy.user.id)
+| extend InitiatingIpAddress = tostring(iff(isnotempty(InitiatedBy.user.ipAddress), InitiatedBy.user.ipAddress, InitiatedBy.app.ipAddress))
+| extend InitiatingAccountName = tostring(split(InitiatingUserPrincipalName, "@")[0]), InitiatingAccountUPNSuffix = tostring(split(InitiatingUserPrincipalName, "@")[1])
+| project-reorder TimeGenerated, OperationName, InitiatingUserOrApp, AADOperationType, targetDisplayName, Result, InitiatingIpAddress, UserAgent, CorrelationId, TenantId, AADTenantId

@@ -1,0 +1,42 @@
+id: 5e8f3a27-4d65-4019-b8c4-1f3a7d9c2e86
+name: Successful Sign-in Using Legacy Authentication
+description: |
+  Detects any successful authentication via legacy auth protocols (IMAP, POP3,
+  SMTP AUTH, Exchange ActiveSync with basic auth, older Office clients). Legacy
+  auth bypasses MFA and Conditional Access and is the #1 vector for password
+  spray. Any success here on a modern tenant is worth investigating; production
+  tenants should block legacy auth entirely via CA.
+severity: Medium
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - SigninLogs
+queryFrequency: 1h
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - CredentialAccess
+  - DefenseEvasion
+relevantTechniques:
+  - T1110
+  - T1078.004
+  - T1556
+query: |
+  let LegacyProtocols = dynamic(["Exchange ActiveSync", "AutoDiscover", "IMAP4", "IMAP", "MAPI Over HTTP", "Offline Address Book", "Other clients", "POP3", "POP", "SMTP", "Authenticated SMTP", "Exchange Web Services", "EWS"]);
+  SigninLogs
+  | where TimeGenerated > ago(1h)
+  | where ResultType == 0
+  | where ClientAppUsed in (LegacyProtocols) or ClientAppUsed has "Other"
+  | project TimeGenerated, UserPrincipalName, ClientAppUsed, AppDisplayName, IPAddress, Location, UserAgent, ResourceDisplayName
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: UserPrincipalName
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: IPAddress
+version: 1.0.0
+kind: Scheduled

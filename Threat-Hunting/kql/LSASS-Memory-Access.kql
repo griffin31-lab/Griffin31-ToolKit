@@ -1,0 +1,83 @@
+// Name: LSASS Memory Access Attempt
+// Description: Detects processes reading LSASS memory — a core step of Mimikatz /
+//              ProcDump-style credential dumping. Uses the ASR "LSASS credential theft"
+//              audit event as a high-fidelity signal, plus a fallback using
+//              DeviceEvents ReadProcessMemoryApiCall events targeting lsass.exe.
+// MITRE ATT&CK: T1003.001 (OS Credential Dumping: LSASS Memory),
+//               T1003 (OS Credential Dumping)
+// Data Source: DeviceEvents (Microsoft Defender for Endpoint)
+// Platform:    Microsoft Defender XDR / Microsoft Sentinel
+// Time window: 7 days
+// Reference:   ./LSASS-Memory-Access.md
+// Context:     Dumping LSASS yields NTLM hashes, Kerberos tickets, and cached passwords
+//              for every user who logged on since boot. Every major ransomware operator
+//              and APT group uses it. Running the ASR rule in audit mode first surfaces
+//              the legitimate LSASS accessors you need to allow-list before enforcement.
+//
+// Recommended actions on hits:
+// - Identify the InitiatingProcessFileName — if unknown, isolate the device
+// - Check Account context: the attacker already has code execution as this user
+// - Rotate credentials for every user logged on to the device since last reboot
+// - Review domain controller Kerberos tickets for signs of Golden Ticket / Silver Ticket use
+// - After allow-listing legitimate accessors, flip the ASR rule from Audit to Block
+//
+// ---------------------------------------------------------------------------
+// Extended context, background, tuning, and attribution
+// ---------------------------------------------------------------------------
+//
+// # LSASS Memory Access Attempt
+//
+// <sub>[← Back to KQL index](../README.md)</sub>
+//
+// ## Why this hunt
+//
+// LSASS (`lsass.exe`) holds every credential secret currently cached on a Windows host — NTLM hashes, Kerberos TGTs, cleartext passwords (when WDigest is enabled), domain cached credentials. An attacker who can dump LSASS memory takes the whole authentication stack with them.
+//
+// This is the single most reliable pre-lateral-movement detection a defender has. Every major ransomware crew (Conti, LockBit, BlackCat), every nation-state APT, and every commodity red-team toolkit (Mimikatz, `procdump -ma lsass.exe`, Nanodump, SafetyKatz) touches LSASS at some point.
+//
+// ## Expected output
+//
+// | Column | Meaning |
+// |---|---|
+// | `ActionType` | `AsrLsassCredentialTheftAudited` / `...Blocked` are the highest-signal events. `OpenProcessApiCall` / `ReadProcessMemoryApiCall` targeting `lsass.exe` are the raw primitives. |
+// | `InitiatingProcessFileName` | The process that tried to read LSASS. Legitimate set is short: AV engines, EDR, some Microsoft tools. Anything else is suspicious. |
+// | `InitiatingProcessFolderPath` | Attacker tools often live under `%TEMP%`, `%APPDATA%`, `C:\Users\Public`, `C:\Windows\Tasks` |
+// | `InitiatingProcessCommandLine` | Look for `-ma lsass.exe`, `procdump`, `sekurlsa`, `mimikatz`, `out-minidump` |
+//
+// A clean baseline has LSASS reads from: Defender (`MsMpEng.exe`), LSASS itself, occasionally WMI services. Flag anything else.
+//
+// ## Tuning notes
+//
+// - **Enable the ASR rule in Audit first.** Rule GUID: `9e6c4e1f-7d60-472f-ba1a-a39ef669e4b2`. Audit mode surfaces legitimate accessors in your environment. Allow-list them, then flip the rule to Block.
+// - `OpenProcessApiCall` with lsass as the target is a noisier signal than the ASR event — expect more false positives from AV / EDR / performance monitoring tools. Aggregate by `InitiatingProcessFileName` first.
+// - Add an exclusion list of your known-good EDR / backup / AV binaries at the top of the query as a `let` list.
+//
+// ## Recommended hardening
+//
+// 1. **Turn on Credential Guard** (Virtualization-based security) — secures LSASS secrets even against code running with SYSTEM/Admin privileges
+// 2. **Enable the ASR rule Block credential stealing from the Windows local security authority subsystem (lsass.exe)** — once audit mode is clean, flip to Block
+// 3. **Enable LSA Protection (RunAsPPL)** — marks LSASS as a Protected Process Light, blocking unprotected code from reading its memory
+// 4. **Disable WDigest** — prevents cleartext password caching in LSASS (modern Windows disables this by default, verify on legacy hosts)
+// 5. **Tiered admin model** — privileged accounts never log on interactively to workstations, so even a successful LSASS dump yields no useful domain creds
+// 6. **Phishing-resistant MFA + Windows Hello for Business** — replaces NTLM/Kerberos password auth that Mimikatz dumps are useful against
+//
+// ## Source & attribution
+//
+// Query adapted from **reprise99/Sentinel-Queries** — `Defender for Endpoint/Device-ASRLsassAudit.kql` (MIT), supplemented with raw `OpenProcessApiCall` / `ReadProcessMemoryApiCall` logic from the Microsoft Defender hunting docs. Related prior art: **microsoft/Microsoft-365-Defender-Hunting-Queries** — `Credential Access/procdump-lsass-credentials.md`.
+//
+// ## References
+//
+// - [MITRE ATT&CK T1003.001 — LSASS Memory](https://attack.mitre.org/techniques/T1003/001/)
+// - [Microsoft Learn: Attack surface reduction rules reference](https://learn.microsoft.com/en-us/defender-endpoint/attack-surface-reduction-rules-reference)
+// - [Microsoft Learn: Configure added LSA protection](https://learn.microsoft.com/en-us/windows-server/security/credentials-protection-and-management/configuring-additional-lsa-protection)
+// - [Microsoft Learn: Credential Guard overview](https://learn.microsoft.com/en-us/windows/security/identity-protection/credential-guard/)
+
+DeviceEvents
+| where Timestamp > ago(7d)
+| where ActionType in ("AsrLsassCredentialTheftAudited", "AsrLsassCredentialTheftBlocked", "OpenProcessApiCall", "ReadProcessMemoryApiCall")
+| where (ActionType startswith "AsrLsassCredentialTheft")
+     or (ActionType in ("OpenProcessApiCall", "ReadProcessMemoryApiCall") and FileName =~ "lsass.exe")
+| project Timestamp, DeviceName, ActionType, FileName,
+          InitiatingProcessFileName, InitiatingProcessCommandLine,
+          InitiatingProcessAccountUpn, InitiatingProcessFolderPath, AdditionalFields
+| sort by Timestamp desc

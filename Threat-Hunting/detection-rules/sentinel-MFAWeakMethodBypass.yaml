@@ -1,0 +1,53 @@
+id: 6b29c75e-1f84-4b3a-9d06-7e5c0a8b4d39
+name: MFA Satisfied via Weak / Phishable Method
+description: |
+  Detects successful authentications where MFA was satisfied using a method
+  susceptible to real-time phishing and push fatigue (SMS, voice call, phone
+  app notification without number matching). A sudden jump in this method on a
+  user who normally uses FIDO2 / Windows Hello / number-matching push is a
+  strong indicator of an AitM / token-replay attack.
+severity: Medium
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - SigninLogs
+queryFrequency: 1h
+queryPeriod: 24h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - CredentialAccess
+  - InitialAccess
+relevantTechniques:
+  - T1621
+  - T1556.006
+  - T1111
+query: |
+  let WeakMethods = dynamic(["OneWaySMS", "TwoWayVoiceMobile", "TwoWayVoiceOffice", "TwoWayVoiceOtherMobile", "PhoneAppNotification"]);
+  let BaselineWindow = 14d;
+  let baseline = SigninLogs
+    | where TimeGenerated between (ago(BaselineWindow) .. ago(24h))
+    | where ResultType == 0
+    | mv-expand AuthenticationDetails
+    | extend Method = tostring(parse_json(tostring(AuthenticationDetails)).authenticationMethod)
+    | summarize UsualMethods = make_set(Method) by UserPrincipalName;
+  SigninLogs
+  | where TimeGenerated > ago(1h)
+  | where ResultType == 0
+  | mv-expand AuthenticationDetails
+  | extend Method = tostring(parse_json(tostring(AuthenticationDetails)).authenticationMethod)
+  | where Method in (WeakMethods)
+  | join kind=leftouter (baseline) on UserPrincipalName
+  | where UsualMethods !has Method
+  | project TimeGenerated, UserPrincipalName, IPAddress, Location, Method, UsualMethods, AppDisplayName
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: UserPrincipalName
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: IPAddress
+version: 1.0.0
+kind: Scheduled

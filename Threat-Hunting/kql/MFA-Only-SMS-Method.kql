@@ -1,0 +1,98 @@
+// Name: Users Whose Only MFA Method Is SMS
+// Description: Inventories users whose sole authentication method observed in sign-ins
+//              over the last 30 days is text message (SMS). SMS is the weakest MFA
+//              method — subject to SIM swap, SS7 interception, and social-engineering
+//              of mobile carriers — and is an NIST-deprecated control.
+// MITRE ATT&CK: T1111 (Multi-Factor Authentication Interception),
+//               T1621 (Multi-Factor Authentication Request Generation),
+//               T1451 (SIM Card Swap)
+// Data Source: SigninLogs (Entra ID)
+// Platform:    Microsoft Sentinel / Log Analytics
+// Time window: 30 days
+// Reference:   ./MFA-Only-SMS-Method.md
+// Context:     CISA, NIST SP 800-63B, and Microsoft all recommend against SMS as a
+//              primary MFA method. In 2023–2025 telemetry the most common account-takeover
+//              pattern against MFA'd accounts is SIM swap + SMS interception — because
+//              the attacker does not need to phish the victim, only their carrier.
+//              This is an inventory-style hunt that feeds a hardening program.
+//
+// Recommended actions on hits:
+// - Contact the user and walk them through registering Microsoft Authenticator (app + number matching)
+// - Add users to a hardening campaign — track reduction in SMS-only over time
+// - Apply Authentication Strength CA policies requiring phishing-resistant methods for priv users
+//
+// ---------------------------------------------------------------------------
+// Extended context, background, tuning, and attribution
+// ---------------------------------------------------------------------------
+//
+// # Users Whose Only MFA Method Is SMS
+//
+// <sub>[← Back to KQL index](../README.md)</sub>
+//
+// ## Why this hunt
+//
+// SMS is the weakest widely-deployed MFA method. NIST SP 800-63B deprecated it for high-assurance contexts a decade ago, and CISA and Microsoft now consistently recommend against it. The real-world attack paths are easy and don't require the user to do anything wrong:
+//
+// - **SIM swap** — attacker social-engineers the carrier into porting the victim's number to an attacker SIM.
+// - **SS7 / signaling interception** — possible against most US and European mobile networks.
+// - **Malicious carrier insider** — single most common vector in some 2023–2024 takeover cases.
+// - **Helpdesk phishing** — attacker calls internal IT impersonating the user, gets SMS pushed to their number.
+//
+// SMS MFA still beats no MFA, so this hunt is not about removing it but about **finding users who only have SMS so you can upgrade them**. Every user whose account depends on SMS alone is a one-SIM-swap away from compromise.
+//
+// ## Expected output
+//
+// | Column | Meaning |
+// |---|---|
+// | `UserPrincipalName` | The user |
+// | `CountOfDistinctMFAMethods` | Should be 1 (SMS only) |
+// | `ListOfMFAMethods` | Will always include "text" |
+//
+// ### Prioritization
+//
+// When rolling out hardening, prioritize users in this list in this order:
+//
+// 1. **Privileged users** (Global Admin, Security Admin, Exchange Admin, etc.) — block them if they stay on SMS; require phishing-resistant methods.
+// 2. **Executives, finance, and legal** — social-engineering targets with high-impact mailboxes.
+// 3. **Engineering with cloud/prod access** — anyone who can deploy code, rotate keys, or touch IaC.
+// 4. **Everyone else** — long-tail rollout with communication.
+//
+// ## Tuning notes
+//
+// - **UserType filter:** the default excludes guests. Guests are harder to harden (you don't own their carrier relationship) but should still be tracked — flip the filter to include them when building the full inventory.
+// - **"text" vs "SMS" string:** Entra labels vary. Broaden with `has_any("text", "sms", "SMS")` if needed.
+// - **Complement:** pair with `Identity-VisualizeMFAMethods.kql` (reprise99) for a tenant-wide MFA method dashboard.
+// - **Passwordless targets:** the goal is to move to Microsoft Authenticator with number matching (phishing-resistant for most scenarios), FIDO2 keys (true phishing-resistant), or Windows Hello for Business.
+//
+// ## Recommended hardening
+//
+// 1. **Authentication Strengths** — define strengths like "Phishing-resistant MFA" and require it for privileged roles via Conditional Access. This is the enforcement lever.
+// 2. **Disable SMS as a registration method** for new users once adoption is high enough (Entra → Authentication methods policy).
+// 3. **Number matching** is now enforced by default in Authenticator — keeps MFA-fatigue push-bombing at bay.
+// 4. **Passkeys / FIDO2** for tier-0 roles. No social-engineering vector works against hardware-bound credentials.
+// 5. **Conditional Access for privileged roles**: Grant = Require Authentication Strength = Phishing-resistant MFA. Block SMS entirely for these users.
+//
+// ## References
+//
+// - [Entra Authentication Strengths](https://learn.microsoft.com/en-us/entra/identity/authentication/concept-authentication-strengths)
+// - [CISA guidance: Phishing-resistant MFA](https://www.cisa.gov/news-events/alerts/2022/10/31/implementing-phishing-resistant-mfa)
+// - [NIST SP 800-63B deprecation of SMS](https://pages.nist.gov/800-63-3/sp800-63b.html)
+// - [MITRE ATT&CK T1111 — MFA Interception](https://attack.mitre.org/techniques/T1111/)
+//
+// ## Source & attribution
+//
+// > Source: [reprise99/Sentinel-Queries — Azure Active Directory/Identity-FindUsersOnlyusingTextforMFA.kql](https://github.com/reprise99/Sentinel-Queries/blob/main/Azure%20Active%20Directory/Identity-FindUsersOnlyusingTextforMFA.kql) · MIT License
+
+SigninLogs
+| where TimeGenerated > ago(30d)
+// Comment out next line to include guests; members are the higher-leverage hardening target
+| where UserType == "Member"
+| mv-expand todynamic(AuthenticationDetails)
+| extend AuthenticationMethod = tostring(AuthenticationDetails.authenticationMethod)
+| where AuthenticationMethod !in ("Previously satisfied", "Password", "Other")
+| where isnotempty(AuthenticationMethod)
+| summarize
+    CountOfDistinctMFAMethods = dcount(AuthenticationMethod),
+    ListOfMFAMethods = make_set(AuthenticationMethod)
+    by UserPrincipalName
+| where CountOfDistinctMFAMethods == 1 and ListOfMFAMethods has "text"

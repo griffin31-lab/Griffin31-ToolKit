@@ -1,0 +1,106 @@
+// Name: First-Time Service Principal / App Registration Created by an Actor
+// Description: Flags 'Add service principal' operations performed by a user who has
+//              not created a service principal in the previous 90 days. Turns the
+//              volume of benign SP creations into a small, actionable set of new
+//              actors touching this sensitive primitive.
+// MITRE ATT&CK: T1136.003 (Create Account: Cloud Account),
+//               T1098.001 (Account Manipulation: Additional Cloud Credentials),
+//               T1078.004 (Valid Accounts: Cloud Accounts)
+// Data Source: AuditLogs (Entra ID directory audit)
+// Platform:    Microsoft Sentinel / Log Analytics
+// Time window: 90-day baseline, 1-day hit window
+// Reference:   ./New-App-Registration-First-Time-Actor.md
+// Context:     Attackers create service principals / app registrations for long-lived
+//              persistence (client-secret auth that survives password rotation and
+//              MFA). Filtering on first-time-actor is a robust tenant-agnostic way to
+//              cut through the noise of legitimate dev activity.
+//
+// Recommended actions on hits:
+// - Confirm the Actor has a legitimate business reason (dev work, CI/CD setup)
+// - Check AppId against the live app-registration inventory
+// - Review whether the app has been granted high-privilege Graph / Azure roles
+// - If unauthorized, delete the service principal (Remove-MgServicePrincipal)
+//
+// ---------------------------------------------------------------------------
+// Extended context, background, tuning, and attribution
+// ---------------------------------------------------------------------------
+//
+// # First-Time Service Principal / App Registration Created by an Actor
+//
+// <sub>[← Back to KQL index](../README.md)</sub>
+//
+// > Source: [reprise99 / Sentinel-Queries — Audit-DetectFirstTimeServicePrincipalCreation.kql](https://github.com/reprise99/Sentinel-Queries/blob/main/Azure%20Active%20Directory/Audit-DetectFirstTimeServicePrincipalCreation.kql) · MIT License
+//
+// ## Why this hunt
+//
+// App registrations / service principals are one of the most attractive M365 persistence primitives for an attacker:
+//
+// - **Survives password rotation** — they authenticate with a client secret / certificate, independent of any human account
+// - **Survives MFA rollout** — service principals do not do MFA; they use client credentials flow
+// - **Low-privilege creation** — any user who is not restricted via `authorizationPolicy` can create a new app registration
+// - **High ceiling** — once created, the SP can be granted Graph `*.All` permissions which unlock tenant-wide data access
+//
+// The full volume of `Add service principal` events is too noisy for alerting (CI/CD pipelines, Azure DevOps, Terraform, every developer). **Filtering on first-time-for-this-actor collapses that volume by 95%+ in most tenants** and exposes a small, triageable set of new SP-creating users every day.
+//
+// Documented real-world uses of this pattern:
+//
+// - Midnight Blizzard (NOBELIUM) — heavy use of adversary-created service principals with admin consent
+// - Storm-0558 / Volt Typhoon / Scattered Spider campaigns — SP creation for token-theft persistence
+// - Commodity BEC — low-skill attackers now follow the same playbook for automation
+//
+// ## Expected output
+//
+// | Column | What it tells you |
+// |---|---|
+// | `TimeGenerated` | When the service principal was created |
+// | `Actor` | UPN of the user who created it — first time they have done so |
+// | `AppId` | Entra AppId of the new service principal |
+//
+// A healthy tenant returns a low number of rows per day (the dev team's rotation). Anomalies stand out immediately.
+//
+// ## Tuning notes
+//
+// - **Baseline window** — default 90 days (`ago(90d)`). Shorter baseline surfaces more "new" actors; longer is quieter. Tune to your team's developer onboarding cadence
+// - **Include apps too** — extend `OperationName == "Add service principal"` to also include `"Add application"` to capture app registration vs. enterprise app creation
+// - **Enrich with roles** — join to `AuditLogs` where `OperationName == "Add app role assignment to service principal"` for the same `AppId` to show if the new SP was granted privileges shortly after
+// - **Correlate with sign-in** — pivot `AppId` to `AADServicePrincipalSignInLogs` to see if the SP is already being used and from where
+// - **MS-PIM filter** — already covered by the `isnotempty(Actor)` clause (PIM elevation shows `Actor` empty)
+//
+// ## Related queries
+//
+// - `Credential-Added-To-App-Registration.kql` — detects client secrets added after creation
+// - `Application-Ownership-Changed.kql` — detects ownership takeovers
+// - `Suspicious-OAuth-Consent.kql` — consent to the new SP
+//
+// ## Recommended hardening
+//
+// 1. **Restrict default app registration creation** — Entra admin > User settings > "Users can register applications" = **No**. Makes creation a privileged operation
+// 2. **App Governance in Defender for Cloud Apps** — alerts on new apps with rare community use, broad permissions, suspicious reply URLs
+// 3. **Admin consent workflow** — users must route consent requests through reviewers
+// 4. **Graph permission classification** — mark high-risk scopes (`.All`) as admin-consent-only
+// 5. **Entra Access Reviews** — recurring review of all service principals with > N sign-ins in the last 30 days
+// 6. **Conditional Access for workload identities** (M365 E5 / Entra ID P2) — require location / risk conditions for service principal sign-ins
+// 7. **Monitor Expiring Credentials** — surface SPs with long-lived (>2 year) secrets; rotate and move to certificates
+//
+// ## References
+//
+// - [MITRE ATT&CK T1136.003](https://attack.mitre.org/techniques/T1136/003/)
+// - [MITRE ATT&CK T1098.001](https://attack.mitre.org/techniques/T1098/001/)
+// - [Microsoft Learn: App registrations vs enterprise apps](https://learn.microsoft.com/entra/identity-platform/application-model)
+// - [Microsoft Security Blog: Midnight Blizzard — service principal abuse](https://www.microsoft.com/security/blog/2024/01/25/midnight-blizzard-guidance-for-responders-on-nation-state-attack/)
+
+let knownusers =
+    AuditLogs
+    | where TimeGenerated > ago(90d) and TimeGenerated < ago(1d)
+    | where OperationName == "Add service principal"
+    | extend Actor = tostring(parse_json(tostring(InitiatedBy.user)).userPrincipalName)
+    | where isnotempty(Actor)
+    | distinct Actor;
+AuditLogs
+| where TimeGenerated > ago(1d)
+| where OperationName == "Add service principal"
+| extend Actor = tostring(parse_json(tostring(InitiatedBy.user)).userPrincipalName)
+| where isnotempty(Actor)
+| where Actor !in (knownusers)
+| extend AppId = tostring(AdditionalDetails[1].value)
+| project TimeGenerated, Actor, AppId

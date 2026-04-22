@@ -1,0 +1,115 @@
+// Name: Multiple Users Forwarded to Same External Destination (BEC campaign)
+// Description: Identifies when more than one mailbox is configured to forward mail to
+//              the same destination within a 7-day window — a classic BEC-campaign
+//              fingerprint where the attacker has compromised multiple accounts and
+//              funnels all stolen mail to a single collection inbox.
+// MITRE ATT&CK: T1114.003 (Email Collection: Email Forwarding Rule),
+//               T1020    (Automated Exfiltration),
+//               T1078    (Valid Accounts)
+// Data Source: OfficeActivity (Exchange workload)
+// Platform:    Microsoft Sentinel / Log Analytics
+// Time window: 7-day look-back, 1-day trigger window
+// Reference:   ./Multiple-Users-Forwarded-Same-Destination.md
+// Context:     Individually, forwarding rules can be legitimate. The campaign-level
+//              fingerprint is multiple distinct compromised users forwarding to a
+//              single attacker-controlled destination mailbox. This query surfaces
+//              that exact pattern.
+//
+// Recommended actions on hits:
+// - If DistinctUserCount > 2, assume a campaign and declare an incident
+// - Collect all UserId values — rotate passwords and revoke sessions for each
+// - Remove the offending rules on every affected mailbox
+// - Feed DestinationMailAddress into your phishing / threat-intel platform
+// - Review mail flow to that destination for the leaked content
+//
+// ---------------------------------------------------------------------------
+// Extended context, background, tuning, and attribution
+// ---------------------------------------------------------------------------
+//
+// # Multiple Users Forwarded to Same External Destination
+//
+// <sub>[← Back to KQL index](../README.md)</sub>
+//
+// > Source: [Azure-Sentinel / Solutions/Microsoft 365/Hunting Queries/MultipleUsersEmailForwardedToSameDestination.yaml](https://github.com/Azure/Azure-Sentinel/blob/master/Solutions/Microsoft%20365/Hunting%20Queries/MultipleUsersEmailForwardedToSameDestination.yaml) · MIT License
+//
+// ## Why this hunt
+//
+// A single user with a forwarding rule may be a compromised mailbox or a misconfigured but benign setup. **Multiple distinct mailboxes forwarding to the same destination is the fingerprint of a BEC campaign** — the attacker has compromised N accounts and is funnelling their mail into one collection inbox to monitor for finance keywords (invoices, wire requests, tax docs).
+//
+// Why this query works so well:
+//
+// - It unifies all three forwarding primitives: `Set-Mailbox -ForwardingSmtpAddress`, `ForwardTo`, `RedirectTo`
+// - It deduplicates on destination address, not per-user rule
+// - The `DistinctUserCount > 1` predicate is the high-precision signal — false positives are extremely rare
+//
+// Real incidents that this query would have caught:
+//
+// - 2022-2024 BEC attacks targeting law-firm / real-estate escrow networks where attackers compromised 5-20 mailboxes across co-operating firms
+// - 2024 Scattered Spider helpdesk-social-engineering campaigns in which post-compromise the adversary set forwarding on several related finance mailboxes
+//
+// ## Expected output
+//
+// | Column | What it tells you |
+// |---|---|
+// | `StartTime` / `EndTime` | Window of rule creations |
+// | `DestinationMailAddress` | The external address receiving mail from multiple of your users |
+// | `ClientIP` | Source IP of the rule creator (often shared if same session) |
+// | `DistinctUserCount` | Number of distinct compromised mailboxes |
+// | `UserId` | Array of affected mailbox owners |
+// | `EventCount` | Total forwarding events |
+//
+// Expected / benign hits (rare):
+//
+// - An internal distribution list address being forwarded to by several members who all work on the same project
+// - A shared-mailbox admin workflow where one destination collects status from multiple service mailboxes
+//
+// Suspicious / incident-level hits:
+//
+// - `DestinationMailAddress` at a consumer webmail provider or lookalike domain
+// - Two or more `ClientIP` values that share ASN / geolocation but differ from your users' normal geos
+// - Destination domain recently registered (<30 days) or flagged by threat-intel
+//
+// ## Tuning notes
+//
+// - **Threshold** — default `DistinctUserCount > 1`. For noisy tenants, raise to `> 2` or `> 3` and accept some loss in precision
+// - **Allow-list known destinations** — maintain a watchlist of approved forwarders (e-discovery, journaling, archival services) and exclude
+// - **Shorten the bin** — for scheduled analytic, set `queryfrequency = 1h` and match `queryPeriod = 1h` for near-real-time BEC detection
+// - **Enrich with DnsEvents / threat intel** — add a join against your TI provider to surface destination-domain reputation
+// - **Pair with sign-in correlation** — for each `UserId` in the output, check `SigninLogs` for impossible-travel / risky-sign-in in the 24 hours before rule creation
+//
+// ## Recommended hardening
+//
+// 1. **Block external auto-forwarding tenant-wide** — the single most impactful control. Exchange drops the forwarded mail at the transport layer
+// 2. **MFA + phishing-resistant auth** — most BEC starts with password-spray or infostealer creds. Phishing-resistant methods (FIDO2, cert-based) break the chain
+// 3. **Token protection** — binds refresh tokens to the originating device, neutralizing AiTM-relay
+// 4. **Conditional Access: block legacy auth** — SMTP AUTH / IMAP / POP still work with infostealer credentials
+// 5. **Monitor Quarantine Actions for post-delivery changes** — a follow-on BEC move is "SoftDelete" on forwarded messages to hide the trail
+// 6. **Defender for Office 365 — Mailbox Intelligence** — baselines normal mailbox activity and alerts on anomalies
+//
+// ## References
+//
+// - [MITRE ATT&CK T1114.003](https://attack.mitre.org/techniques/T1114/003/)
+// - [Microsoft Learn: External email forwarding](https://learn.microsoft.com/defender-office-365/outbound-spam-policies-external-email-forwarding)
+// - [Microsoft Security Blog: BEC Lures and Financial Fraud](https://www.microsoft.com/security/blog/)
+
+let queryfrequency = 1d;
+let queryperiod = 7d;
+OfficeActivity
+| where TimeGenerated > ago(queryperiod)
+| where OfficeWorkload =~ "Exchange"
+| where Parameters has_any ("ForwardTo", "RedirectTo", "ForwardingSmtpAddress")
+| mv-apply DynamicParameters = todynamic(Parameters) on (summarize ParsedParameters = make_bag(bag_pack(tostring(DynamicParameters.Name), DynamicParameters.Value)))
+| evaluate bag_unpack(ParsedParameters, columnsConflict='replace_source')
+| extend DestinationMailAddress = tolower(case(
+    isnotempty(column_ifexists("ForwardTo", "")), column_ifexists("ForwardTo", ""),
+    isnotempty(column_ifexists("RedirectTo", "")), column_ifexists("RedirectTo", ""),
+    isnotempty(column_ifexists("ForwardingSmtpAddress", "")), trim_start(@"smtp:", column_ifexists("ForwardingSmtpAddress", "")),
+    ""))
+| where isnotempty(DestinationMailAddress)
+| mv-expand split(DestinationMailAddress, ";")
+| extend ClientIPValues = extract_all(@'\[?(::ffff:)?(?P<IPAddress>(\d+\.\d+\.\d+\.\d+)|[^\]]+)\]?([-:](?P<Port>\d+))?', dynamic(["IPAddress", "Port"]), ClientIP)[0]
+| extend ClientIP = tostring(ClientIPValues[0]), Port = tostring(ClientIPValues[1])
+| summarize StartTime = min(TimeGenerated), EndTime = max(TimeGenerated), DistinctUserCount = dcount(UserId), UserId = make_set(UserId, 250), Ports = make_set(Port, 250), EventCount = count() by tostring(DestinationMailAddress), ClientIP
+| where DistinctUserCount > 1 and EndTime > ago(queryfrequency)
+| mv-expand UserId to typeof(string)
+| extend AccountName = tostring(split(UserId, "@")[0]), AccountUPNSuffix = tostring(split(UserId, "@")[1])

@@ -1,0 +1,94 @@
+// Name: Impossible Travel — User Signed In From 3+ Countries in One Day
+// Description: Flags user principals who successfully signed in from three or more
+//              distinct countries within a single day. Catches token replay / session
+//              hijacking and account sharing. More permissive than strict impossible-
+//              travel (which does time/distance math) and easier to tune.
+// MITRE ATT&CK: T1078.004 (Valid Accounts: Cloud Accounts),
+//               T1550 (Use Alternate Authentication Material)
+// Data Source: SigninLogs (Entra ID interactive & non-interactive)
+// Platform:    Microsoft Sentinel / Log Analytics  (Advanced Hunting variant uses AADSignInEventsBeta)
+// Time window: 7 days, grouped by day
+// Reference:   ./Impossible-Travel-Multi-Country.md
+// Context:     Native Entra ID Protection does per-sign-in scoring; this per-day
+//              country-count view catches cases where the attacker is careful about
+//              velocity but not about geography. Especially useful post-AiTM where
+//              the attacker uses the stolen refresh token alongside the user's own
+//              continued sign-ins.
+//
+// Recommended actions on hits:
+// - Validate against known travel / VPN usage — filter allow-listed users out
+// - Review the full list of countries; a mix of user's home country + unexpected ones is highest-risk
+// - Pivot by UserPrincipalName into SigninLogs for that day — look for token claims differences
+// - On confirmed takeover: revoke sessions (Revoke-MgUserSignInSession), reset password, force MFA reset
+//
+// ---------------------------------------------------------------------------
+// Extended context, background, tuning, and attribution
+// ---------------------------------------------------------------------------
+//
+// # Impossible Travel — User Signed In From 3+ Countries in One Day
+//
+// <sub>[← Back to KQL index](../README.md)</sub>
+//
+// ## Why this hunt
+//
+// Entra ID Protection includes a built-in impossible-travel risk detection — but it is per-sign-in, it requires an Entra ID P2 license, and its thresholds are tuned for precision (low false-positive rate) rather than recall (catching everything). Good hunters complement it with their own, more permissive detections.
+//
+// This hunt asks a simple question: **did a user sign in successfully from three or more different countries in a single day?** It catches:
+//
+// - AiTM / token-theft scenarios — the attacker uses the stolen refresh token from their own country while the real user keeps working from theirs
+// - Account sharing (compliance concern, not always attacker — but still worth knowing)
+// - Tor / multi-hop VPN usage
+//
+// The 3-country threshold is a pragmatic choice: legitimate users on VPNs or flying between destinations tend to produce 1–2 countries; attackers piled on top of real user activity tend to push it to 3+.
+//
+// ## Expected output
+//
+// | Column | Meaning |
+// |---|---|
+// | `UserPrincipalName` | The user |
+// | `TimeGenerated` (day bucket) | The day of the burst |
+// | `CountOfCountries` | How many distinct countries appeared |
+// | `ListOfCountries` | Which countries |
+//
+// ### Red flags
+//
+// - User's home country is in the list, alongside 2+ unexpected ones
+// - Countries include known adversary-source geos for your sector (threat-intel dependent)
+// - Hit correlates in time with a `RiskState == "atRisk"` sign-in for the same user
+// - User's mailbox gained a forwarding rule in the same window (BEC pattern)
+//
+// ## Tuning notes
+//
+// - **VPN-heavy workforces:** lots of traveling salespeople legitimately hit 3 countries. Either raise the threshold to 4 or maintain an allow-list of `UserPrincipalName`s.
+// - **Broken location data:** some ISPs return wrong country codes; strip noisy geos with `| where Location !in ("","unknown")`.
+// - **Alerting cadence:** shrink `ago(7d)` to `ago(1h)` and run hourly for a near-real-time rule.
+// - **Tighten further:** add `| where AuthenticationRequirement == "singleFactorAuthentication"` to focus on cases where MFA was satisfied with a stolen token claim (no re-challenge).
+//
+// ## Recommended hardening
+//
+// 1. **Token Protection (preview)** in Conditional Access — binds the sign-in token to the originating device, so a replayed token from another country fails.
+// 2. **Continuous Access Evaluation** — closer to real-time session revocation on risk.
+// 3. **Block anonymous proxies / Tor** via Named Locations in Conditional Access.
+// 4. **Sign-in frequency** for high-impact apps — force re-auth every N hours so a stolen token expires quickly.
+// 5. **Risk-based CA** — enforce MFA on any sign-in with Entra ID Protection risk state `atRisk`.
+//
+// ## References
+//
+// - [Entra ID Protection risk detections](https://learn.microsoft.com/en-us/entra/id-protection/concept-identity-protection-risks)
+// - [Token Protection in CA](https://learn.microsoft.com/en-us/entra/identity/conditional-access/concept-token-protection)
+// - [MITRE ATT&CK T1078.004 — Cloud Accounts](https://attack.mitre.org/techniques/T1078/004/)
+// - [MITRE ATT&CK T1550 — Use Alternate Authentication Material](https://attack.mitre.org/techniques/T1550/)
+//
+// ## Source & attribution
+//
+// > Source: [reprise99/Sentinel-Queries — Azure Active Directory/Identity-FindUsersMultipleCountriesSameDay.kql](https://github.com/reprise99/Sentinel-Queries/blob/main/Azure%20Active%20Directory/Identity-FindUsersMultipleCountriesSameDay.kql) · MIT License
+
+SigninLogs
+| where TimeGenerated > ago(7d)
+| where ResultType == 0
+| where isnotempty(Location)
+| summarize
+    CountOfCountries = dcount(Location),
+    ListOfCountries = make_set(Location)
+    by UserPrincipalName, bin(TimeGenerated, 1d)
+| where CountOfCountries >= 3

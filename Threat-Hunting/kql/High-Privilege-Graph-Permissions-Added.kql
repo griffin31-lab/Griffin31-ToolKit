@@ -1,0 +1,95 @@
+// Name: High-Privilege Microsoft Graph Permissions Added (*.All scope)
+// Description: Surfaces OAuth permission grants where the scope ends in ".All" —
+//              permissions that apply across every object of a given type
+//              (e.g., Mail.Read.All, Files.ReadWrite.All, Sites.FullControl.All).
+// MITRE ATT&CK: T1098 (Account Manipulation),
+//               T1098.003 (Additional Cloud Roles),
+//               T1528 (Steal Application Access Token)
+// Data Source: AuditLogs (Entra ID directory audit log)
+// Platform:    Microsoft Sentinel / Log Analytics
+// Time window: Default 14 days (AuditLogs retention) — tune to taste
+// Reference:   ./High-Privilege-Graph-Permissions-Added.md
+// Context:     *.All permissions are tenant-wide and bypass per-object scoping. Attackers
+//              that compromise an app-registration secret or certificate can use these to
+//              read every user's mail, every SharePoint site, or every OneDrive.
+//              Granting *.All where a scoped permission would work is an RBAC anti-pattern.
+//
+// Recommended actions on hits:
+// - Confirm the granting user is authorized to assign tenant-wide permissions
+// - Review the AppId against your approved-app inventory
+// - Check whether a scoped equivalent (e.g., Mail.Read over a specific mailbox) would satisfy the use case
+// - Alert if the app is not on the allow-list or was created recently
+// - Pivot to AADServicePrincipalSignInLogs on the ServicePrincipalAppId to see what the app did next
+//
+// ---------------------------------------------------------------------------
+// Extended context, background, tuning, and attribution
+// ---------------------------------------------------------------------------
+//
+// # High-Privilege Microsoft Graph Permissions Added (*.All scope)
+//
+// <sub>[← Back to KQL index](../README.md)</sub>
+//
+// ## Why this hunt
+//
+// Microsoft Graph permissions come in two flavors:
+//
+// - **Scoped** — grant access to one resource or one user (e.g., `Mail.Read` for the signed-in user)
+// - **Tenant-wide (`.All`)** — grant access to every object of that type across the whole tenant (e.g., `Mail.Read.All` = read every user's mail)
+//
+// `.All` permissions are the equivalent of handing an app a master key. They are necessary for some legitimate apps (backup, DLP, eDiscovery), but they should be rare, reviewed, and tightly controlled. When an attacker compromises an app-registration secret or persuades a user to consent to a malicious app, `.All` permissions are the fastest path to full-tenant data exfiltration.
+//
+// This hunt catches every case where a user or admin adds a `.All`-scoped Graph permission to an app. The output feeds an allow-list review: every hit should either match an approved app or trigger an investigation.
+//
+// ## Expected output
+//
+// | Column | Meaning |
+// |---|---|
+// | `TimeGenerated` | When the permission was added |
+// | `InitiatedByUserPrincipalName` | Who granted the permission |
+// | `ActivityDisplayName` | Delegated grant vs. app-role assignment |
+// | `AddedPermission` | The raw permission string (e.g., `Mail.Read.All`) |
+// | `IP` | IP of the granting user |
+// | `ServicePrincipalAppId` | Entra App ID of the consented app |
+//
+// A normal tenant sees occasional `.All` grants tied to known IT tooling (M365 DSC, Intune, backup products). A suspicious hit shows:
+// - A user account granting (rather than an admin)
+// - An unfamiliar or recently created app
+// - High-impact scopes (`Mail.ReadWrite.All`, `Sites.FullControl.All`, `Directory.ReadWrite.All`, `User.ReadWrite.All`)
+//
+// ## Tuning notes
+//
+// - **Noise source:** Microsoft first-party apps during onboarding and some CSP tenants trigger many grants. Maintain an allow-list of `ServicePrincipalAppId` values from Microsoft / verified publishers and filter them out.
+// - **Time window:** AuditLogs retention is 14–30 days in most workspaces. For a daily alert, set `TimeGenerated > ago(1d)`.
+// - **Pivot:** Once you catch an unfamiliar app, pivot by its `ServicePrincipalAppId` into `AADServicePrincipalSignInLogs` and `OfficeActivity` to see what the app accessed.
+//
+// ## Recommended hardening
+//
+// 1. **Restrict user consent** in Entra admin center → Enterprise applications → Consent and permissions. The safest posture is "Do not allow user consent" combined with an admin-consent workflow.
+// 2. **Classify permissions** — mark `.All` scopes as high-risk and require admin review.
+// 3. **Use Defender for Cloud Apps** app governance to score every OAuth app for rarity, reply-URL anomalies, and Graph call patterns.
+// 4. **Prefer scoped permissions** — for apps that only need one mailbox, use `application access policies` in Exchange Online to limit `Mail.*.All` down to that mailbox.
+// 5. **Rotate secrets** on any app with `.All` permissions; certificates preferred over passwords.
+//
+// ## References
+//
+// - [Microsoft Graph permissions reference](https://learn.microsoft.com/en-us/graph/permissions-reference)
+// - [Limit mailbox access for Graph apps](https://learn.microsoft.com/en-us/graph/auth-limit-mailbox-access)
+// - [MITRE ATT&CK T1098.003 — Additional Cloud Roles](https://attack.mitre.org/techniques/T1098/003/)
+// - [MITRE ATT&CK T1528 — Steal Application Access Token](https://attack.mitre.org/techniques/T1528/)
+//
+// ## Source & attribution
+//
+// > Source: [Bert-JanP/Hunting-Queries-Detection-Rules — Azure Active Directory/AllGraphPermissionsAdded.md](https://github.com/Bert-JanP/Hunting-Queries-Detection-Rules/blob/main/Azure%20Active%20Directory/AllGraphPermissionsAdded.md) · BSD-3-Clause License
+
+AuditLogs
+| where Category == "ApplicationManagement"
+| where ActivityDisplayName in ("Add delegated permission grant", "Add app role assignment to service principal")
+| mv-expand TargetResources
+| where TargetResources.displayName == "Microsoft Graph"
+| mv-expand TargetResources.modifiedProperties
+| extend InitiatedByUserPrincipalName = InitiatedBy.user.userPrincipalName
+| extend AddedPermission = replace_string(tostring(TargetResources_modifiedProperties.newValue),'"','')
+| extend IP = todynamic(InitiatedBy).user.ipAddress
+| extend ServicePrincipalAppId = replace_string(tostring(todynamic(TargetResources).modifiedProperties[5].newValue),'"','')
+| where AddedPermission has ".All"
+| project-reorder TimeGenerated, InitiatedByUserPrincipalName, ActivityDisplayName, AddedPermission, IP, ServicePrincipalAppId

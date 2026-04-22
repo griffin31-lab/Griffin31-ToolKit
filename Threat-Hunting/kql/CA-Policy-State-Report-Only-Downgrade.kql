@@ -1,0 +1,108 @@
+// Name: Conditional Access Policy Downgraded to Report-Only (stealth disable)
+// Description: Detects when a Conditional Access policy transitions from 'enabled'
+//              to 'enabledForReportingButNotEnforced'. Equivalent to a silent
+//              disable — the policy still shows up as 'on' in casual admin views
+//              but no longer enforces. High-favored evasion move.
+// MITRE ATT&CK: T1562.007 (Impair Defenses: Disable or Modify Cloud Firewall),
+//               T1556    (Modify Authentication Process)
+// Data Source: AuditLogs (Entra ID directory audit)
+// Platform:    Microsoft Sentinel / Log Analytics
+// Time window: 5 minutes (scheduled analytic)
+// Reference:   ./CA-Policy-State-Report-Only-Downgrade.md
+// Context:     More subtle than a hard disable — report-only looks 'on' in the UI
+//              and reports in sign-in logs as if enforcing, but allows the sign-in.
+//              Adversaries exploit this to evade defender's reflexive 'policy on'
+//              visual check.
+//
+// Recommended actions on hits:
+// - Verify the change is part of a documented test / rollout (legitimate use case)
+// - If not legitimate: re-enable the policy immediately
+// - Review sign-ins against the affected policy for the interim period
+// - Treat the modifier as potentially compromised; full account review
+//
+// ---------------------------------------------------------------------------
+// Extended context, background, tuning, and attribution
+// ---------------------------------------------------------------------------
+//
+// # Conditional Access Policy Downgraded to Report-Only
+//
+// <sub>[← Back to KQL index](../README.md)</sub>
+//
+// > Source: [Azure-Sentinel / Solutions/Microsoft Entra ID/Analytic Rules/Conditional Access - A Conditional Access policy was put into report-only mode.yaml](https://github.com/Azure/Azure-Sentinel/blob/master/Solutions/Microsoft%20Entra%20ID/Analytic%20Rules/Conditional%20Access%20-%20A%20Conditional%20Access%20policy%20was%20put%20into%20report-only%20mode.yaml) · MIT License
+//
+// ## Why this hunt
+//
+// **Report-only mode** is an intended Microsoft feature that lets admins test a CA policy against live sign-in traffic without enforcing grant / session controls. For attackers, it is a gift-wrapped evasion primitive:
+//
+// - The policy still appears **enabled** in casual admin views
+// - Sign-in logs still show the policy evaluating (`conditionalAccessStatus = reportOnlySuccess`)
+// - But **no grant control is enforced** — sign-ins that would have been blocked are let through
+//
+// A defender doing a quick "yes all my critical CA policies are on" visual check does not distinguish `enabled` from `enabledForReportingButNotEnforced` without inspecting the policy state field. That asymmetry is exactly what adversaries exploit.
+//
+// This is distinct from hard-disable (the neighbouring `CA-Policy-Deleted-Or-Disabled` hunt catches that). A mature detection pipeline should alert on **both** transitions.
+//
+// ## Expected output
+//
+// | Column | What it tells you |
+// |---|---|
+// | `TimeGenerated` | When the state transition happened |
+// | `policy` | Name of the affected CA policy |
+// | `modifiedBy` | Actor UPN |
+// | `accountName` / `upnSuffix` | Entity mapping |
+// | `stateOld` / `stateNew` | Concrete evidence: `enabled` → `enabledForReportingButNotEnforced` |
+//
+// Expected (benign) hits:
+//
+// - Planned rollout where a policy is moved back to report-only to troubleshoot a break-fix
+// - Sanctioned policy-authoring workflow (development → report-only → enforced)
+//
+// Suspicious hits:
+//
+// - Outside a change-management window
+// - On a policy that controls MFA, device compliance, or legacy auth block
+// - By an actor who is not a dedicated CA admin
+// - Immediately followed by sign-ins that the policy would otherwise have blocked
+//
+// ## Tuning notes
+//
+// - **Low-frequency tenant** — in tenants where CA policies are almost never touched, every hit is an incident; go straight to alert
+// - **Active-rollout tenant** — if your security team frequently tests policies in report-only, maintain an allow-list of known-active test policies and suppress them
+// - **Paired enforcement** — to get complete CA lifecycle coverage, deploy all three: `CA-Policy-Deleted-Or-Disabled.kql`, this one, and the Microsoft-published `enabled_to_enabled` variant for grant/session control changes
+// - **Time window** — 5 min for near-real-time alerting; no look-back window needed
+// - **Correlate with SigninLogs** — for each `policy` name, query `SigninLogs | where ConditionalAccessPolicies has "<policy>"` and look for `result = "reportOnlyFailure"` (would-have-blocked but let through)
+//
+// ## Recommended hardening
+//
+// 1. **PIM with approval for CA Admin** — eliminates the standing-privilege avenue
+// 2. **Segregate CA authoring from CA deployment** — two accounts: developer can modify, approver promotes to enforced. PIM ticket-gating enforces this
+// 3. **Alert on long-running report-only** — any policy that has been in `enabledForReportingButNotEnforced` for > 7 days should be reviewed by a human
+// 4. **Daily export + diff of CA policy JSON** — version-controlled store means you catch any state change (plus gives restoration material)
+// 5. **Workload Identity Conditional Access** — protects the CA admin's service principals too, not just humans
+// 6. **Microsoft Defender for Cloud Apps — policy templates** — ships a pre-built template for "CA policy change"; use alongside this Sentinel rule
+//
+// ## References
+//
+// - [MITRE ATT&CK T1562.007](https://attack.mitre.org/techniques/T1562/007/)
+// - [Microsoft Learn: Conditional Access — report-only mode](https://learn.microsoft.com/entra/identity/conditional-access/concept-conditional-access-report-only)
+// - [Microsoft Learn: Monitor CA changes](https://learn.microsoft.com/entra/identity/conditional-access/monitor-conditional-access)
+
+AuditLogs
+| where OperationName in ("Update conditional access policy")
+| extend stateOld = extractjson("$.state", tostring(TargetResources[0].modifiedProperties[0].oldValue))
+| extend stateNew = extractjson("$.state", tostring(TargetResources[0].modifiedProperties[0].newValue))
+| where stateOld == "enabled" and stateNew == "enabledForReportingButNotEnforced"
+| extend modifiedBy = tostring(InitiatedBy.user.userPrincipalName)
+| extend accountName = tostring(split(modifiedBy, "@")[0])
+| extend upnSuffix = tostring(split(modifiedBy, "@")[1])
+| project
+    TimeGenerated,
+    OperationName,
+    policy = TargetResources[0].displayName,
+    modifiedBy,
+    accountName,
+    upnSuffix,
+    result = Result,
+    stateOld,
+    stateNew
+| order by TimeGenerated desc

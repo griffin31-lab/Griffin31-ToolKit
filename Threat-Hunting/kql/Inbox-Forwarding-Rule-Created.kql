@@ -1,0 +1,97 @@
+// Name: Mailbox Inbox Forwarding Rule Created (BEC indicator)
+// Description: Detects New-InboxRule / Set-InboxRule events that forward or redirect
+//              mail externally — the textbook Business Email Compromise persistence
+//              mechanism. Parses the Parameters bag, detects rules with suspicious
+//              names (no alphanumerics) and external destinations.
+// MITRE ATT&CK: T1114.003 (Email Collection: Email Forwarding Rule),
+//               T1020    (Automated Exfiltration),
+//               T1078    (Valid Accounts)
+// Data Source: OfficeActivity (Exchange workload)
+// Platform:    Microsoft Sentinel / Log Analytics
+// Time window: 30 days
+// Reference:   ./Inbox-Forwarding-Rule-Created.md
+// Context:     Inbox rules that forward/redirect to external domains are one of the
+//              most common post-compromise persistence actions in BEC. Attackers
+//              often use rule names of a single character or symbols to hide the rule
+//              from the user's Outlook UI.
+//
+// Recommended actions on hits:
+// - Review the RuleName — obfuscated names (".", "-", " ") are classic BEC markers
+// - Remove the rule via Remove-InboxRule or through the user's OWA settings
+// - Reset the user's password + revoke sessions if compromise is confirmed
+// - Inspect 30 days of mail flow for leaked data from that mailbox
+// - Check if the same destination appears across multiple mailboxes (broader campaign)
+//
+// ---------------------------------------------------------------------------
+// Extended context, background, tuning, and attribution
+// ---------------------------------------------------------------------------
+//
+// # Mailbox Inbox Forwarding Rule Created
+//
+// <sub>[← Back to KQL index](../README.md)</sub>
+//
+// > Source: [reprise99 / Sentinel-Queries — OfficeActivity-InboxRuleParse.kql](https://github.com/reprise99/Sentinel-Queries/blob/main/Office%20365/OfficeActivity-InboxRuleParse.kql) · MIT License
+//
+// ## Why this hunt
+//
+// Creating a mail-forwarding inbox rule is the single most common post-compromise move in Business Email Compromise (BEC). It is attractive to attackers because it is:
+//
+// - **Low-noise** — most tenants don't alert on rule creation
+// - **Persistent** — survives password rotation (the rule lives on the mailbox, not the credential)
+// - **Silent** — Outlook Desktop hides rules with blank or single-character names from the user UI
+// - **Selective** — attackers can target keywords ("invoice", "wire transfer", "payment") to auto-forward only the valuable mail
+//
+// FBI IC3 and Microsoft Digital Defense Reports consistently list mailbox rule manipulation among the top 3 BEC techniques.
+//
+// ## Expected output
+//
+// Each row = one rule creation event with a name that is all symbols / whitespace.
+//
+// | Column | What it tells you |
+// |---|---|
+// | `TimeGenerated` | When the rule was created |
+// | `UserId` | The compromised mailbox owner |
+// | `ClientIP` | Source IP that ran `New-InboxRule` — pivot for geo / known-bad |
+// | `RuleName` | The non-alphanumeric rule name (".", " ", "...", etc.) |
+//
+// A well-run tenant should see **zero hits**. Any hit is high-confidence and warrants immediate response.
+//
+// ## Tuning notes
+//
+// - **Widen to include any rule** — remove the regex filter to review every new inbox rule (much noisier; use only during an active incident)
+// - **Add Set-InboxRule** — Operation `Set-InboxRule` captures modifications to existing rules; attackers sometimes hijack an existing rule rather than create a new one
+// - **External destination** — to focus only on rules that forward externally, join with the `OfficeMailForwarding_hunting` query which parses `ForwardTo` / `RedirectTo` parameters
+// - **Time window** — for scheduled analytic rule, tighten to 1 hour
+// - **Allow-list admin tooling** — some vendors (Abnormal Security, Avanan) create inbox rules programmatically — allow-list their service principal
+//
+// ## Related queries to pair this with
+//
+// - `OfficeMailForwarding_hunting` (Azure Sentinel) — full parameter-parsed version capturing `Set-Mailbox -ForwardingSmtpAddress`, `ForwardTo`, `RedirectTo`
+// - `MultipleUsersEmailForwardedToSameDestination` — detects campaign-scale BEC where multiple compromised users forward to the same external inbox
+//
+// ## Recommended hardening
+//
+// 1. **Block auto-forwarding to external domains** — Exchange Online Protection > Outbound Spam Policy > Automatic forwarding = Off. This is the single highest-impact control
+// 2. **Alert on all inbox rule creations for privileged accounts** — CxO, Finance, HR mailboxes should alert on any rule change
+// 3. **MFA enforcement** — eliminates the password-spray / infostealer entry point that enables the rule creation in the first place
+// 4. **Conditional Access: block legacy auth** — many BEC attacks still ride on IMAP / POP / SMTP-AUTH using infostealer creds
+// 5. **Token protection** (CA) — binds tokens to the originating device, neutralizing AiTM-replay attacks
+// 6. **Defender for Office 365 — Attack Simulation** — baseline user susceptibility to the phishing campaigns that deliver BEC creds
+//
+// ## References
+//
+// - [MITRE ATT&CK T1114.003](https://attack.mitre.org/techniques/T1114/003/)
+// - [Microsoft Learn: Configure automatic forwarding](https://learn.microsoft.com/defender-office-365/outbound-spam-policies-external-email-forwarding)
+// - [Microsoft Security Blog: Business Email Compromise detection deep dive](https://techcommunity.microsoft.com/t5/microsoft-defender-for-cloud/business-email-compromise/ba-p/3741528)
+// - [FBI IC3 — BEC/EAC reporting](https://www.ic3.gov/)
+
+OfficeActivity
+| where TimeGenerated > ago(30d)
+| where Operation == "New-InboxRule"
+| mv-apply p=todynamic(Parameters) on (
+    where p.Name == "Name"
+    | extend RuleName = tostring(p.Value)
+  )
+| project TimeGenerated, UserId, ClientIP, RuleName
+// Additionally surface rule names with no alphanumeric characters — a classic attacker-obfuscation marker
+| where RuleName matches regex @"^[^a-zA-Z0-9]*$"
