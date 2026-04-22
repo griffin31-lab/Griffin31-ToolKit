@@ -1,0 +1,15 @@
+# Tenant-specific artefacts — never commit
+tenants/
+data/
+
+# Local test results and debug output
+*.log
+*.csv
+*.tmp
+test-output/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
