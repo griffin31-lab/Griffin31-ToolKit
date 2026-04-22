@@ -11,7 +11,7 @@
 
 <p>
   <a href="https://github.com/griffin31-lab/Griffin31-ToolKit/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/griffin31-lab/Griffin31-ToolKit?style=for-the-badge&color=4472C4&labelColor=1B2A4A"/></a>
-  <img alt="Tools" src="https://img.shields.io/badge/Tools-9-4472C4?style=for-the-badge&labelColor=1B2A4A"/>
+  <img alt="Tools" src="https://img.shields.io/badge/Tools-10%20%2B%20hunt%20library-4472C4?style=for-the-badge&labelColor=1B2A4A"/>
   <a href="https://github.com/griffin31-lab/Griffin31-ToolKit/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/badge/License-MIT-4472C4?style=for-the-badge&labelColor=1B2A4A"/></a>
   <img alt="PowerShell" src="https://img.shields.io/badge/PowerShell-7.x-4472C4?style=for-the-badge&labelColor=1B2A4A&logo=powershell&logoColor=white"/>
 </p>
@@ -37,6 +37,7 @@
   - [Identity & Access](#identity--access)
   - [Data & Collaboration](#data--collaboration)
   - [Email Security](#email-security)
+  - [Threat Hunting & Detection](#threat-hunting--detection)
 - [Getting started](#getting-started)
 - [Design principles](#design-principles)
 - [Security](#security)
@@ -70,8 +71,10 @@ Every tool follows the same principles — **one problem, one tool**; **safe by 
 | If you want to… | Use | Output |
 |---|---|---|
 | Audit your Conditional Access policies + posture score | [CA-Policy-Analyzer](CA-Policy-Analyzer/) ★ | HTML report |
+| Keep break-glass accounts excluded from every CA policy, always | [CA-BreakGlass-Enforcer](CA-BreakGlass-Enforcer/) | Azure Logic App |
 | Prepare for the May 2026 CA enforcement change | [CA-Update-AffectedApps](CA-Update-AffectedApps/) | Excel risk report |
 | Find sites, OneDrives, Teams with public sharing or missing labels | [SharePoint-Sites-Audit](SharePoint-Sites-Audit/) ★ | HTML report |
+| Hunt OAuth abuse, infostealers, or token theft in M365 | [Threat-Hunting](Threat-Hunting/) | KQL / IoCs / detection rules |
 | Clean up stale devices | [Entra-StaleDevices-Cleanup](Entra-StaleDevices-Cleanup/) | Excel + actions |
 | Clean up unused app registrations | [Entra-StaleApps-Cleanup](Entra-StaleApps-Cleanup/) | Excel + actions |
 | Catch expiring app credentials before they break production | [Entra-AppCredentials-Audit](Entra-AppCredentials-Audit/) | Excel |
@@ -94,6 +97,10 @@ Exports your full CA configuration, scores every policy 0-100, flags tenant-wide
 **[CA-Update-AffectedApps](CA-Update-AffectedApps/)** &nbsp;·&nbsp; *Prepare for Microsoft's May 2026 CA change*
 Identifies tenant apps using basic OIDC scopes, cross-references sign-in logs for MFA status, and generates an Excel risk report so you can remediate before the change breaks authentication.
 <sub>`Conditional Access` · `App Assessment` · `MFA`</sub>
+
+**[CA-BreakGlass-Enforcer](CA-BreakGlass-Enforcer/)** &nbsp;·&nbsp; *Keep emergency accounts out of every CA policy, always*
+Azure Consumption Logic App that runs every 30 minutes, iterates every Conditional Access policy, and idempotently adds two break-glass account IDs to the `excludeUsers` list. Managed Service Identity auth (no stored credentials), least-privilege Graph scope, If-Match PATCH to avoid overwriting concurrent admin edits.
+<sub>`Conditional Access` · `Break-Glass` · `Azure Logic Apps` · `MSI`</sub>
 
 ### Identity & Access
 
@@ -128,6 +135,12 @@ Interactive organizer for any Microsoft Planner plan — sort buckets A-Z, merge
 **[SPF-Lookup-Validator](SPF-Lookup-Validator/)** &nbsp;·&nbsp; *RFC 7208-compliant SPF chain analysis*
 Recursively walks your entire SPF include chain, counts the real DNS lookup total against the 10-lookup limit, and catches misconfigurations before they break email delivery.
 <sub>`SPF` · `Email Security` · `DNS`</sub>
+
+### Threat Hunting & Detection
+
+**[Threat-Hunting](Threat-Hunting/)** &nbsp;·&nbsp; *KQL queries, IoCs, and detection rules for M365 / Entra ID / Defender XDR / Sentinel*
+Curated library of **44 KQL hunt queries** spanning OAuth abuse, identity attacks, data exfiltration, persistence, endpoint infostealers, and token theft — each tied to a documented incident (Vercel/Context.ai, Storm-2477 Lumma, Storm-2372 device code, Scattered Spider, NOBELIUM). Plus **5 IOC categories** from CISA advisories + abuse.ch + Microsoft Threat Intel, and **15 production-ready detection rules** (13 Sentinel YAML + 2 Defender XDR custom detections). Every artifact self-contained with inline metadata, MITRE ATT&CK mapping, tuning, and source attribution.
+<sub>`KQL` · `Sentinel` · `Defender XDR` · `Advanced Hunting` · `MITRE ATT&CK` · `IoCs`</sub>
 
 ---
 
