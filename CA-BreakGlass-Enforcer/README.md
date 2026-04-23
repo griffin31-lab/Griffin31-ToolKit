@@ -2,6 +2,8 @@
 
 # CA Emergency Account Exclusion — Logic App (Consumption)
 
+> **Pair this tool with active sign-in monitoring.** This Logic App keeps break-glass accounts excluded from CA policies — which means they can always sign in, including during a compromise. Every successful sign-in by a break-glass account is a high-signal event and must be alerted on. Follow Microsoft's guidance on monitoring sign-in and audit logs for emergency-access accounts: [learn.microsoft.com/entra/identity/role-based-access-control/security-emergency-access#monitor-sign-in-and-audit-logs](https://learn.microsoft.com/en-us/entra/identity/role-based-access-control/security-emergency-access#monitor-sign-in-and-audit-logs). A ready-made KQL hunt for this is included in [`../Threat-Hunting/kql/Break-Glass-Account-Signin.kql`](../Threat-Hunting/kql/Break-Glass-Account-Signin.kql).
+
 ## Overview
 
 Azure **Consumption Logic App** that continuously enforces the exclusion of two emergency/break-glass accounts from **every enabled** Conditional Access policy in the tenant. Runs every 30 minutes and idempotently patches any enabled policy missing the exclusion. Authenticates to Microsoft Graph via the Logic App's system-assigned Managed Identity.
