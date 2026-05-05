@@ -214,9 +214,10 @@ function Build-PolicyRows($list) {
             }
         }
         # Validate PolicyId is a GUID before building the portal URL
-        $pid = [string]$p.PolicyId
-        if ($pid -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
-            $portalUrl = "https://entra.microsoft.com/#view/Microsoft_AAD_ConditionalAccess/ConditionalAccessBlade/policyId/$pid"
+        # NOTE: don't use $pid — that's a PowerShell automatic variable (process ID) and is read-only
+        $policyIdStr = [string]$p.PolicyId
+        if ($policyIdStr -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
+            $portalUrl = "https://entra.microsoft.com/#view/Microsoft_AAD_ConditionalAccess/ConditionalAccessBlade/policyId/$policyIdStr"
             $nameCell = "<a href='$portalUrl' target='_blank' rel='noopener'>$(HtmlEncode $p.PolicyName)</a>"
         } else {
             $nameCell = "$(HtmlEncode $p.PolicyName)"
@@ -304,9 +305,10 @@ if ($nestedGroups -and $nestedGroups.PoliciesUsingNestedGroups -and $nestedGroup
         } else {
             "<span class='assign-badge include'>Include</span>"
         }
-        $pid = [string]$row.PolicyId
-        $nameCell = if ($pid -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
-            "<a href='https://entra.microsoft.com/#view/Microsoft_AAD_ConditionalAccess/ConditionalAccessBlade/policyId/$pid' target='_blank' rel='noopener'>$(HtmlEncode $row.PolicyName)</a>"
+        # NOTE: don't use $pid — automatic read-only variable for process ID
+        $policyIdStr = [string]$row.PolicyId
+        $nameCell = if ($policyIdStr -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
+            "<a href='https://entra.microsoft.com/#view/Microsoft_AAD_ConditionalAccess/ConditionalAccessBlade/policyId/$policyIdStr' target='_blank' rel='noopener'>$(HtmlEncode $row.PolicyName)</a>"
         } else { HtmlEncode $row.PolicyName }
         $ngHtml += "<tr><td>$nameCell</td><td>$(StateBadge $row.PolicyState)</td><td>$assignBadge</td><td>$(HtmlEncode $row.GroupName)</td></tr>"
     }
