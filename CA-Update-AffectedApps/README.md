@@ -69,4 +69,4 @@ Six-phase flow:
 ## Related tools
 
 - [CA-Policy-Analyzer](../CA-Policy-Analyzer/) — full CA posture report with the May 2026 enforcement check + 14 other insights
-- [Entra-AppCredentials-Audit](../Entra-AppCredentials-Audit/) — for apps flagged HIGH, also check their credential hygiene
+- [Entra-AppRegistration-Audit](../Entra-AppRegistration-Audit/) — for apps flagged HIGH, also check their permission risk & credential hygiene

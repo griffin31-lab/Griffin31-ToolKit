@@ -76,5 +76,4 @@ Four steps per app:
 
 ## Related tools
 
-- [Entra-AppCredentials-Audit](../Entra-AppCredentials-Audit/) — once your apps are scoped, audit their credential health
-- [Entra-StaleApps-Cleanup](../Entra-StaleApps-Cleanup/) — if you inherit a mess of over-permissioned apps, start here
+- [Entra-AppRegistration-Audit](../Entra-AppRegistration-Audit/) — audit permission risk, credentials, and staleness across your app registrations

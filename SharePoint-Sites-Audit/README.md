@@ -120,5 +120,5 @@ Report includes: posture score hero, KPI row, group-by-finding view (collapsed b
 
 ## Related tools
 
-- [Entra-AppCredentials-Audit](../Entra-AppCredentials-Audit/) — audit apps that may access SharePoint
+- [Entra-AppRegistration-Audit](../Entra-AppRegistration-Audit/) — audit apps (and their permissions) that may access SharePoint
 - [CA-Policy-Analyzer](../CA-Policy-Analyzer/) — companion posture report for Conditional Access

@@ -62,5 +62,4 @@ Single flow — audit first, then optionally act:
 
 ## Related tools
 
-- [Entra-StaleApps-Cleanup](../Entra-StaleApps-Cleanup/) — same pattern for app registrations
-- [Entra-AppCredentials-Audit](../Entra-AppCredentials-Audit/) — catch expiring app credentials
+- [Entra-AppRegistration-Audit](../Entra-AppRegistration-Audit/) — same audit → disable → delete pattern for app registrations (plus permission risk & credentials)
