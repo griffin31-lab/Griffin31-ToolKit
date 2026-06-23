@@ -1018,7 +1018,13 @@ $payload = [ordered]@{
   creds = @($reportCreds)
 }
 $json = $payload | ConvertTo-Json -Depth 6 -Compress
-$json = $json -replace '</', '<\/'
+# Harden the JSON embedded in <script>: a maliciously named app registration could
+# otherwise inject markup. '<' and '>' appear only inside JSON string values, so
+# escaping them (plus the JS line separators U+2028/U+2029) is lossless and blocks
+# every <script>/<!-- breakout while the data still renders identically.
+$bs = [char]92   # backslash built via char code so the escape sequence can't be mangled
+$json = $json.Replace('<', "${bs}u003c").Replace('>', "${bs}u003e")
+$json = $json.Replace([char]0x2028, "${bs}u2028").Replace([char]0x2029, "${bs}u2029")
 
 $htmlTemplate = @'
 <!DOCTYPE html>
