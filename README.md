@@ -76,8 +76,7 @@ Every tool follows the same principles — **one problem, one tool**; **safe by 
 | Find sites, OneDrives, Teams with public sharing or missing labels | [SharePoint-Sites-Audit](SharePoint-Sites-Audit/) ★ | HTML report |
 | Hunt OAuth abuse, infostealers, or token theft in M365 | [Threat-Hunting](Threat-Hunting/) | KQL / IoCs / detection rules |
 | Clean up stale devices | [Entra-StaleDevices-Cleanup](Entra-StaleDevices-Cleanup/) | Excel + actions |
-| Clean up unused app registrations | [Entra-StaleApps-Cleanup](Entra-StaleApps-Cleanup/) | Excel + actions |
-| Catch expiring app credentials before they break production | [Entra-AppCredentials-Audit](Entra-AppCredentials-Audit/) | Excel |
+| Audit app registrations — permission risk, credentials, staleness, workload identity | [Entra-AppRegistration-Audit](Entra-AppRegistration-Audit/) ★ | HTML + Excel + actions |
 | Scope Exchange Online app permissions to specific mailboxes | [EXO-AppPermissions-Manager](EXO-AppPermissions-Manager/) | Interactive |
 | Sort, dedupe, and clean up buckets in a Microsoft Planner plan | [Planner-Plan-Organizer](Planner-Plan-Organizer/) | Interactive |
 | Validate an SPF record against the 10-lookup RFC limit | [SPF-Lookup-Validator](SPF-Lookup-Validator/) | Console |
@@ -104,13 +103,9 @@ Azure Consumption Logic App that runs every 30 minutes, iterates every Condition
 
 ### Identity & Access
 
-**[Entra-AppCredentials-Audit](Entra-AppCredentials-Audit/)** &nbsp;·&nbsp; *Catch expiring app credentials*
-Scans every app registration, flags expired and soon-to-expire certificates and client secrets, resolves owners, and optionally removes expired credentials. Excel report with direct links into the Entra portal.
-<sub>`Entra ID` · `App Registrations` · `Credential Hygiene`</sub>
-
-**[Entra-StaleApps-Cleanup](Entra-StaleApps-Cleanup/)** &nbsp;·&nbsp; *Clean up unused app registrations*
-Every tenant accumulates unused app registrations — each one a credential exposure and a permission-abuse risk. Queries the Graph sign-in activity report, flags apps idle past your threshold, and lets you disable or delete them safely.
-<sub>`Entra ID` · `App Registrations` · `Cleanup`</sub>
+**[Entra-AppRegistration-Audit](Entra-AppRegistration-Audit/) ★** &nbsp;·&nbsp; *Permission risk, credentials, staleness & workload identity in one scan*
+Classifies every app registration's API permissions as High/Medium/Low by what they can actually do, flags expired and expiring certificates and client secrets, scores staleness from sign-in activity, resolves owners, and marks which apps are candidates for Conditional Access / ID Protection for workload identities. Read-only by default with gated cleanup actions (remove cred / disable / delete). Interactive self-contained HTML report plus Excel, with direct links into the Entra portal.
+<sub>`Entra ID` · `App Registrations` · `Permission Risk` · `Workload Identity` · `Credential Hygiene`</sub>
 
 **[Entra-StaleDevices-Cleanup](Entra-StaleDevices-Cleanup/)** &nbsp;·&nbsp; *Audit, disable, or delete stale devices*
 Finds devices that haven't signed in for X days, filters by OS and ownership, shows a full audit with MDM info, then gives you the decision — export only, disable, or delete.
