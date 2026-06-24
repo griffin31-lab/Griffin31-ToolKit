@@ -1024,7 +1024,7 @@ $json = $payload | ConvertTo-Json -Depth 6 -Compress
 # every <script>/<!-- breakout while the data still renders identically.
 $bs = [char]92   # backslash built via char code so the escape sequence can't be mangled
 $json = $json.Replace('<', "${bs}u003c").Replace('>', "${bs}u003e")
-$json = $json.Replace([char]0x2028, "${bs}u2028").Replace([char]0x2029, "${bs}u2029")
+$json = $json.Replace([string][char]0x2028, "${bs}u2028").Replace([string][char]0x2029, "${bs}u2029")
 
 $htmlTemplate = @'
 <!DOCTYPE html>
