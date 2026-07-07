@@ -12,7 +12,7 @@
 - **Permission risk per app** — every API permission classified **High / Medium / Low by what it can actually do**, not by how many it has. App's overall risk = its single highest-risk permission.
 - **Credential health** — expired and expiring certs/secrets (red ≤7 days, amber ≤14), for both app registrations and enterprise apps (SAML signing certs, secrets)
 - **Staleness** — last sign-in across **all flows** (user-delegated *and* app-only / daemon, as client or resource) → Active / Stale / Never used. A **Last Flow** column shows which type it last used. Managed identities show **N/A (not tracked)** — their token use largely isn't captured by this report, so they're never falsely flagged "Never used".
-- **Enabled / disabled state** — each app's enterprise-app (service principal) `accountEnabled` state, shown on every table and **filterable** (Excel AutoFilter + HTML dropdown)
+- **Enabled / disabled state** — tracked correctly as **two independent states** (Microsoft treats them separately): the **app registration**'s own activation (`isDisabled` — the portal "State: Activated/Deactivated") and the **enterprise app / service principal** sign-in (`accountEnabled` — "Enabled for users to sign-in"). App-registration views show **App Reg** + **SP Sign-in** side by side; enterprise views show the SP state. All **filterable** (Excel AutoFilter + HTML dropdown)
 - **Owners resolved** + tenant-owned vs external
 - **Workload identity protection candidates** — flags which apps you can target with Conditional Access for workload identities (single-tenant only) vs ID Protection only (multi-tenant), per Microsoft's eligibility rules
 - **KPI dashboard** and **direct Entra portal links** on every row
@@ -94,7 +94,7 @@ The flag appears as a column on the **Permission Risk** sheet and as a count on 
 
 - **Summary** — KPI dashboard + permission-risk breakdown
 - **Permission Risk** — every app registration with permissions: overall risk, High/Med/Low counts, **Enabled** state, sensitive permission list, owner, link
-- **Enterprise Apps** — enterprise apps with granted permissions: overall risk, High/Med/Low counts, **App Reg?** (has a local registration or not), type, **Enabled** state, tenancy, granted permission list
+- **Enterprise Apps** — every enterprise app (service principal) in scope, including permission-less / SSO / disabled ones: overall risk, High/Med/Low counts, **App Reg?** (has a local registration or not), type, **Enabled** state, activity, category, granted permission list
 - **Expired Creds** / **Expiring Creds** — color-coded by urgency, with a **Source** column (app reg vs enterprise) and **Enabled** state
 - **Stale & Unused** — stale / never-used / orphaned apps with last sign-in
 - **Action Log** — appears only when an action runs

@@ -160,6 +160,10 @@ function Get-LastSignIn {
   return @{ DateTime = $bestRaw; Flow = $bestFlow }
 }
 
+# ── Helper: Get-EnabledLabel ──
+# Service-principal sign-in state (accountEnabled) -> Enabled / Disabled / No SP.
+function Get-EnabledLabel($v) { if ($v -eq $true) { 'Enabled' } elseif ($v -eq $false) { 'Disabled' } else { 'No SP' } }
+
 # ── Helper: Confirm-WriteAccess ──
 # Called only when the user picks an action. Elevates the Graph session to
 # Application.ReadWrite.All on demand. Returns $false (no error) if the user
@@ -425,7 +429,7 @@ Write-Host "  [$phase/$totalPhases] Fetching app registrations and sign-in activ
 $script:swPhase = [System.Diagnostics.Stopwatch]::StartNew()
 
 Write-Host "    - App registrations..." -ForegroundColor Gray
-$appRegs = Invoke-GraphPaged "https://graph.microsoft.com/v1.0/applications?`$top=999&`$select=id,appId,displayName,createdDateTime,publisherDomain,signInAudience,keyCredentials,passwordCredentials,requiredResourceAccess"
+$appRegs = Invoke-GraphPaged "https://graph.microsoft.com/v1.0/applications?`$top=999&`$select=id,appId,displayName,createdDateTime,publisherDomain,signInAudience,keyCredentials,passwordCredentials,requiredResourceAccess,isDisabled"
 Write-Host "    -> $($appRegs.Count) app registrations" -ForegroundColor Green
 
 Write-Host "    - Service principals..." -ForegroundColor Gray
@@ -593,7 +597,7 @@ function Resolve-Permissions {
 }
 
 function Get-CredentialBuckets {
-  param($app, $portalUrl, $source = 'App reg')
+  param($app, $portalUrl, $source = 'App reg', $enabledLabel = 'Unknown')
   $out = @()
   foreach ($pair in @(
       @{ Set = $app.keyCredentials;      Kind = 'Certificate'   },
@@ -614,6 +618,7 @@ function Get-CredentialBuckets {
         KeyId = $c.keyId
         StartDate = $startDate.ToString('yyyy-MM-dd'); EndDate = $endDate.ToString('yyyy-MM-dd')
         DaysToExpiry = $days; Status = $status; PortalUrl = $portalUrl; Owner = "N/A"; Source = $source
+        AppState = $enabledLabel
       }
     }
   }
@@ -637,6 +642,11 @@ foreach ($app in $appRegs) {
 
   $portalUrl = "https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationMenuBlade/~/Overview/appId/$($app.appId)"
 
+  # An app registration's own enabled state is its `isDisabled` flag (the portal
+  # "State: Activated/Deactivated"), NOT the service principal's accountEnabled —
+  # those are independent (you can disable SP sign-in while the app reg stays active).
+  $regEnabledLabel = if ($app.isDisabled -eq $true) { 'Disabled' } else { 'Enabled' }
+
   # Permissions + risk
   $perms = Resolve-Permissions $app
   $highP = @($perms | Where-Object { $_.Risk -eq 'High' })
@@ -650,7 +660,7 @@ foreach ($app in $appRegs) {
   $permNames     = (@($perms | ForEach-Object { $_.Name }) -join ' ')
 
   # Credentials
-  $creds = Get-CredentialBuckets $app $portalUrl
+  $creds = Get-CredentialBuckets $app $portalUrl 'App reg' $regEnabledLabel
   $allCreds += $creds
   $expiredN  = @($creds | Where-Object { $_.Status -eq 'Expired' }).Count
   $expiringN = @($creds | Where-Object { $_.Status -eq 'Expiring Soon' }).Count
@@ -677,6 +687,8 @@ foreach ($app in $appRegs) {
     ObjectId       = $app.id
     SPObjectId     = if ($sp) { $sp.id } else { $null }
     SPEnabled      = if ($sp) { [bool]$sp.accountEnabled } else { $null }
+    EnabledLabel   = $regEnabledLabel   # app registration's own state (isDisabled)
+    SPSignIn       = if ($sp) { if ([bool]$sp.accountEnabled) { 'Enabled' } else { 'Disabled' } } else { 'No SP' }
     FirstParty     = $isFirstParty
     Tenancy        = if ($isFirstParty) { 'Microsoft' } elseif ($sp -and $sp.appOwnerOrganizationId -eq $tenantId) { 'Tenant' } else { 'Tenant/External' }
     WorkloadIdCand = if (-not $sp) { 'No SP — N/A' }
@@ -824,7 +836,7 @@ foreach ($t in $entTargets) {
   $permNames     = (@($perms | ForEach-Object { $_.Name }) -join ' ')
 
   # --- Credentials on the SP (SAML signing certs, secrets) ---
-  $creds = Get-CredentialBuckets $sp $portalUrl 'Enterprise'
+  $creds = Get-CredentialBuckets $sp $portalUrl 'Enterprise' (Get-EnabledLabel $sp.accountEnabled)
   $entCreds += $creds
   $expiredN  = @($creds | Where-Object { $_.Status -eq 'Expired' }).Count
   $expiringN = @($creds | Where-Object { $_.Status -eq 'Expiring Soon' }).Count
@@ -1107,8 +1119,6 @@ function Set-WlidCell($cell, [string]$val) {
     default               { Set-Fill $cell $GRAY_BG;  Set-Font $cell -color $GRAY_TEXT }
   }
 }
-# Enabled/disabled = enterprise-app (service principal) accountEnabled.
-function Get-EnabledLabel($v) { if ($v -eq $true) { 'Enabled' } elseif ($v -eq $false) { 'Disabled' } else { 'No SP' } }
 function Set-EnabledCell($cell, [string]$val) {
   $cell.Style.HorizontalAlignment = [OfficeOpenXml.Style.ExcelHorizontalAlignment]::Center
   switch ($val) {
@@ -1117,10 +1127,6 @@ function Set-EnabledCell($cell, [string]$val) {
     default    { Set-Fill $cell $GRAY_BG;  Set-Font $cell -color $GRAY_TEXT }
   }
 }
-# App enabled/disabled state keyed by appId — used by Excel (below) and the HTML report.
-$appStateByAppId = @{}
-foreach ($a in $analysis) { $appStateByAppId[$a.AppId] = Get-EnabledLabel $a.SPEnabled }
-foreach ($e in $entAnalysis) { if ($e.AppId -and -not $appStateByAppId.ContainsKey($e.AppId)) { $appStateByAppId[$e.AppId] = Get-EnabledLabel $e.SPEnabled } }
 
 $excel = New-Object OfficeOpenXml.ExcelPackage
 
@@ -1191,15 +1197,15 @@ Set-Font $ws.Cells["B$row"] -size 9 -color $DARK_GRAY; $ws.Cells["B$row:F$row"].
 # ── Sheet 2: Permission Risk ──
 $ws2 = $excel.Workbook.Worksheets.Add("Permission Risk")
 $ws2.TabColor = HexColor "B91C1C"; $ws2.View.ShowGridLines = $false
-$pCols = @(2,32),@(3,24),@(4,11),@(5,6),@(6,6),@(7,6),@(8,14),@(9,12),@(10,19),@(11,50),@(12,34)
+$pCols = @(2,32),@(3,24),@(4,11),@(5,6),@(6,6),@(7,6),@(8,14),@(9,12),@(10,12),@(11,19),@(12,50),@(13,34)
 $ws2.Column(1).Width = 2; foreach ($pc in $pCols) { $ws2.Column($pc[0]).Width = $pc[1] }
-$ws2.Row(1).Height = 8; for ($c = 1; $c -le 12; $c++) { Set-Fill $ws2.Cells[1,$c] $NAVY }
-$ws2.Row(2).Height = 32; for ($c = 1; $c -le 12; $c++) { Set-Fill $ws2.Cells[2,$c] $NAVY }
-$ws2.Cells["B2:L2"].Merge = $true; $ws2.Cells["B2"].Value = "API PERMISSION RISK (overall = highest-risk permission)"
+$ws2.Row(1).Height = 8; for ($c = 1; $c -le 13; $c++) { Set-Fill $ws2.Cells[1,$c] $NAVY }
+$ws2.Row(2).Height = 32; for ($c = 1; $c -le 13; $c++) { Set-Fill $ws2.Cells[2,$c] $NAVY }
+$ws2.Cells["B2:M2"].Merge = $true; $ws2.Cells["B2"].Value = "API PERMISSION RISK (overall = highest-risk permission)"
 Set-Font $ws2.Cells["B2"] -size 16 -bold $true -color $WHITE_C
 $ws2.Cells["B2"].Style.VerticalAlignment = [OfficeOpenXml.Style.ExcelVerticalAlignment]::Center
 $hdrRow = 4; $ws2.Row($hdrRow).Height = 28
-$headers2 = @("App Name","Owner","Risk","High","Med","Low","Tenancy","Enabled","Workload ID","Sensitive Permissions","Portal Link")
+$headers2 = @("App Name","Owner","Risk","High","Med","Low","Tenancy","App Reg","SP Sign-in","Workload ID","Sensitive Permissions","Portal Link")
 for ($k = 0; $k -lt $headers2.Count; $k++) {
   $cell = $ws2.Cells[$hdrRow, ($k + 2)]; $cell.Value = $headers2[$k]
   Set-Fill $cell $ACCENT_BLUE; Set-Font $cell -bold $true -color $WHITE_C
@@ -1212,19 +1218,20 @@ foreach ($a in @($analysis | Where-Object { $_.OverallRisk -ne 'None' } | Sort-O
   $ws2.Cells[$dataRow,4].Value = $a.OverallRisk; Set-RiskCell $ws2.Cells[$dataRow,4] $a.OverallRisk
   $ws2.Cells[$dataRow,5].Value = $a.HighCount; $ws2.Cells[$dataRow,6].Value = $a.MedCount; $ws2.Cells[$dataRow,7].Value = $a.LowCount
   $ws2.Cells[$dataRow,8].Value = $a.Tenancy
-  $enLbl = Get-EnabledLabel $a.SPEnabled
+  $enLbl = $a.EnabledLabel
   $ws2.Cells[$dataRow,9].Value = $enLbl; Set-EnabledCell $ws2.Cells[$dataRow,9] $enLbl
-  $ws2.Cells[$dataRow,10].Value = $a.WorkloadIdCand; Set-WlidCell $ws2.Cells[$dataRow,10] $a.WorkloadIdCand
-  $ws2.Cells[$dataRow,11].Value = $a.SensitivePerms; $ws2.Cells[$dataRow,11].Style.WrapText = $true
-  $ws2.Cells[$dataRow,12].Value = "Open in Entra"; $ws2.Cells[$dataRow,12].Hyperlink = [System.Uri]::new($a.PortalLink)
-  Set-Font $ws2.Cells[$dataRow,12] -color $ACCENT_BLUE; $ws2.Cells[$dataRow,12].Style.Font.UnderLine = $true
+  $ws2.Cells[$dataRow,10].Value = $a.SPSignIn; Set-EnabledCell $ws2.Cells[$dataRow,10] $a.SPSignIn
+  $ws2.Cells[$dataRow,11].Value = $a.WorkloadIdCand; Set-WlidCell $ws2.Cells[$dataRow,11] $a.WorkloadIdCand
+  $ws2.Cells[$dataRow,12].Value = $a.SensitivePerms; $ws2.Cells[$dataRow,12].Style.WrapText = $true
+  $ws2.Cells[$dataRow,13].Value = "Open in Entra"; $ws2.Cells[$dataRow,13].Hyperlink = [System.Uri]::new($a.PortalLink)
+  Set-Font $ws2.Cells[$dataRow,13] -color $ACCENT_BLUE; $ws2.Cells[$dataRow,13].Style.Font.UnderLine = $true
   foreach ($col in 5,6,7) { $ws2.Cells[$dataRow,$col].Style.HorizontalAlignment = [OfficeOpenXml.Style.ExcelHorizontalAlignment]::Center }
-  for ($col = 2; $col -le 12; $col++) { Set-ThinBorder $ws2.Cells[$dataRow,$col] }
-  if ($dataRow % 2 -eq 0) { foreach ($col in 2,3,8,11) { Set-Fill $ws2.Cells[$dataRow,$col] $ROW_ALT } }
-  $ws2.Cells[$dataRow,11].Style.VerticalAlignment = [OfficeOpenXml.Style.ExcelVerticalAlignment]::Top
+  for ($col = 2; $col -le 13; $col++) { Set-ThinBorder $ws2.Cells[$dataRow,$col] }
+  if ($dataRow % 2 -eq 0) { foreach ($col in 2,3,8,12) { Set-Fill $ws2.Cells[$dataRow,$col] $ROW_ALT } }
+  $ws2.Cells[$dataRow,12].Style.VerticalAlignment = [OfficeOpenXml.Style.ExcelVerticalAlignment]::Top
   $dataRow++
 }
-if ($dataRow -gt ($hdrRow + 1)) { $ws2.Cells[$hdrRow, 2, ($dataRow - 1), 12].AutoFilter = $true }
+if ($dataRow -gt ($hdrRow + 1)) { $ws2.Cells[$hdrRow, 2, ($dataRow - 1), 13].AutoFilter = $true }
 
 # ── Helper to build a credentials sheet block ──
 function Add-CredSheet($name, $tab, $title, $rows) {
@@ -1245,7 +1252,7 @@ function Add-CredSheet($name, $tab, $title, $rows) {
     $w.Cells[$dr,5].Value=$c.StartDate; $w.Cells[$dr,6].Value=$c.EndDate
     $w.Cells[$dr,7].Value= if ($c.Status -eq 'Expired') { [math]::Abs($c.DaysToExpiry) } else { $c.DaysToExpiry }
     $w.Cells[$dr,8].Value=$c.Owner
-    $enLbl = if ($c.AppId -and $appStateByAppId.ContainsKey($c.AppId)) { $appStateByAppId[$c.AppId] } else { 'No SP' }
+    $enLbl = if ($c.AppState) { $c.AppState } else { 'Unknown' }
     $w.Cells[$dr,9].Value=$enLbl; Set-EnabledCell $w.Cells[$dr,9] $enLbl
     $w.Cells[$dr,10].Value=$c.Source; $w.Cells[$dr,10].Style.HorizontalAlignment=[OfficeOpenXml.Style.ExcelHorizontalAlignment]::Center
     $w.Cells[$dr,11].Value="Open in Entra"; $w.Cells[$dr,11].Hyperlink=[System.Uri]::new($c.PortalUrl)
@@ -1290,7 +1297,7 @@ if ($cleanupAll.Count -gt 0) {
     $ws5.Cells[$dr,6].Value= if ($a.SignInFlow) { $a.SignInFlow } else { "—" }
     $ws5.Cells[$dr,7].Value=$a.TotalCreds
     $ws5.Cells[$dr,8].Value=$a.Owner
-    $enLbl = Get-EnabledLabel $a.SPEnabled
+    $enLbl = $a.EnabledLabel
     $ws5.Cells[$dr,9].Value=$enLbl; Set-EnabledCell $ws5.Cells[$dr,9] $enLbl
     $ws5.Cells[$dr,10].Value="Open in Entra"; $ws5.Cells[$dr,10].Hyperlink=[System.Uri]::new($a.PortalLink)
     Set-Font $ws5.Cells[$dr,10] -color $ACCENT_BLUE; $ws5.Cells[$dr,10].Style.Font.UnderLine=$true
@@ -1307,8 +1314,8 @@ if ($cleanupAll.Count -gt 0) {
   if ($dr -gt ($hr + 1)) { $ws5.Cells[$hr, 2, ($dr - 1), 10].AutoFilter = $true }
 }
 
-# ── Sheet: Enterprise Apps (actual granted permissions) ──
-$entWithPerms = @($entAnalysis | Where-Object { $_.OverallRisk -ne 'None' })
+# ── Sheet: Enterprise Apps (every service principal in scope) ──
+$entWithPerms = @($entAnalysis)
 if ($entWithPerms.Count -gt 0) {
   $ws7 = $excel.Workbook.Worksheets.Add("Enterprise Apps")
   $ws7.TabColor = HexColor "8E44AD"; $ws7.View.ShowGridLines = $false
@@ -1316,7 +1323,7 @@ if ($entWithPerms.Count -gt 0) {
   $ws7.Column(1).Width = 2; foreach ($x in $ec) { $ws7.Column($x[0]).Width = $x[1] }
   $ws7.Row(1).Height = 8; for ($c=1;$c-le14;$c++){ Set-Fill $ws7.Cells[1,$c] $NAVY }
   $ws7.Row(2).Height = 32; for ($c=1;$c-le14;$c++){ Set-Fill $ws7.Cells[2,$c] $NAVY }
-  $ws7.Cells["B2:N2"].Merge = $true; $ws7.Cells["B2"].Value = "ENTERPRISE APPS — GRANTED PERMISSIONS (what apps actually hold consent to do)"
+  $ws7.Cells["B2:N2"].Merge = $true; $ws7.Cells["B2"].Value = "ENTERPRISE APPS — granted permissions, enabled state & staleness (all service principals in scope)"
   Set-Font $ws7.Cells["B2"] -size 16 -bold $true -color $WHITE_C
   $ws7.Cells["B2"].Style.VerticalAlignment = [OfficeOpenXml.Style.ExcelVerticalAlignment]::Center
   $hr = 4; $ws7.Row($hr).Height = 28
@@ -1389,21 +1396,24 @@ $reportApps = $analysis | Select-Object DisplayName, Owner, OverallRisk, HighCou
   TotalPerms, @{n='Sensitive';e={ $_.SensitivePerms }},
   @{n='Products';e={ @($_.Products) }}, @{n='PermSearch';e={ $_.PermSearch }},
   Tenancy, WorkloadIdCand, StaleStatus,
-  @{n='Status';e={ if ($_.SPEnabled -eq $true) { 'Enabled' } elseif ($_.SPEnabled -eq $false) { 'Disabled' } else { 'No SP' } }},
+  @{n='Status';e={ $_.EnabledLabel }},
+  @{n='SPSignIn';e={ $_.SPSignIn }},
   @{n='DaysSince';e={ $_.DaysSinceLastSignIn }},
   @{n='LastSignIn';e={ if ($_.LastSignIn) { ([datetime]$_.LastSignIn).ToString('yyyy-MM-dd') } else { '' } }},
   @{n='SignInFlow';e={ $_.SignInFlow }},
   TotalCreds, ExpiredCreds, ExpiringCreds, @{n='Portal';e={ $_.PortalLink }}
 
 # Credentials table = app-registration creds + enterprise-app creds, tagged by Source.
+# Each cred already carries its owner object's enabled state (app-reg isDisabled OR SP accountEnabled).
 $reportCreds = @($allCreds + $entCreds) | Select-Object AppName, CredentialType, Description, StartDate, EndDate,
   DaysToExpiry, Status, Owner,
-  @{n='AppState';e={ if ($_.AppId -and $appStateByAppId.ContainsKey($_.AppId)) { $appStateByAppId[$_.AppId] } else { 'No SP' } }},
+  @{n='AppState';e={ if ($_.AppState) { $_.AppState } else { 'Unknown' } }},
   @{n='Source';e={ $_.Source }},
   @{n='Portal';e={ $_.PortalUrl }}
 
-# Enterprise apps = identities holding actual granted consent (incl. apps with no app registration).
-$reportEntApps = $entAnalysis | Where-Object { $_.OverallRisk -ne 'None' } | Select-Object DisplayName, Owner, OverallRisk, HighCount, MedCount, LowCount,
+# Enterprise apps = every analyzed service principal (incl. apps with no app registration
+# and apps holding no granted permissions), so disabled / credentialed / SSO apps are all visible.
+$reportEntApps = $entAnalysis | Select-Object DisplayName, Owner, OverallRisk, HighCount, MedCount, LowCount,
   TotalPerms, @{n='Sensitive';e={ $_.SensitivePerms }},
   @{n='Products';e={ @($_.Products) }}, @{n='PermSearch';e={ $_.PermSearch }},
   Tenancy, @{n='Category';e={ $_.Category }}, @{n='SPType';e={ $_.SPType }}, @{n='HasAppReg';e={ [bool]$_.HasAppReg }},
@@ -1677,7 +1687,8 @@ const COLS = {
     {k:'HighCount',t:'High',num:1},{k:'MedCount',t:'Med',num:1},{k:'LowCount',t:'Low',num:1},
     {k:'WorkloadIdCand',t:'Workload ID',r:a=>wlBadge(a.WorkloadIdCand)},
     {k:'Tenancy',t:'Tenancy',c:'mono'},
-    {k:'Status',t:'Enabled',r:a=>enBadge(a.Status)},
+    {k:'Status',t:'App Reg',r:a=>enBadge(a.Status)},
+    {k:'SPSignIn',t:'SP Sign-in',r:a=>enBadge(a.SPSignIn)},
     {k:'Owner',t:'Owner',c:'mono'},
   ],
   workload:[
@@ -1742,7 +1753,7 @@ function rows(){
     r=r.filter(x=>{
       const hay = state.tab==='creds'
         ? [x.AppName,x.Source,x.CredentialType,x.Description,x.Status,x.AppState,x.Owner]
-        : [x.DisplayName,x.Owner,x.Tenancy,x.Category,x.WorkloadIdCand,x.SPType,x.StaleStatus,x.SignInFlow,x.Status,x.Sensitive,x.PermSearch,prods(x).join(' ')];
+        : [x.DisplayName,x.Owner,x.Tenancy,x.Category,x.WorkloadIdCand,x.SPType,x.StaleStatus,x.SignInFlow,x.Status,x.SPSignIn,x.Sensitive,x.PermSearch,prods(x).join(' ')];
       return hay.join(' ').toLowerCase().includes(state.q);
     });
   }
