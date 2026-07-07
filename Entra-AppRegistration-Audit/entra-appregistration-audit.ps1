@@ -93,6 +93,73 @@ function Invoke-GraphPaged {
   return $all
 }
 
+# ── Helper: Invoke-GraphBatch ──
+# Runs many GET requests in parallel via Graph JSON batching (20 per round trip)
+# instead of one HTTP call each. Returns a hashtable: request id -> sub-response body
+# (a hashtable with .value for collections, or the object itself for single-item GETs;
+# $null on failure). Chunks by 20 and retries throttled / 5xx sub-requests with backoff.
+function Invoke-GraphBatch {
+  param([object[]]$Requests, [string]$Activity = "Batch")   # each item: @{ id=<string>; url=<relative GET url> }
+  $results = @{}
+  $items = @($Requests)
+  if ($items.Count -eq 0) { return $results }
+  $done = 0
+  for ($i = 0; $i -lt $items.Count; $i += 20) {
+    $chunk = @($items[$i..([math]::Min($i + 19, $items.Count - 1))])
+    $attempt = 0
+    while ($chunk.Count -gt 0) {
+      $attempt++
+      $payload = @{ requests = @($chunk | ForEach-Object { @{ id = "$($_.id)"; method = 'GET'; url = $_.url } }) }
+      try {
+        $resp = Invoke-MgGraphRequest -Method POST -Uri 'https://graph.microsoft.com/v1.0/$batch' -Body ($payload | ConvertTo-Json -Depth 5) -ContentType 'application/json' -ErrorAction Stop
+      } catch {
+        if ($attempt -ge 4) { foreach ($c in $chunk) { $results["$($c.id)"] = $null }; break }
+        Start-Sleep -Seconds ([math]::Min(30, [math]::Pow(2, $attempt))); continue
+      }
+      $retry = @()
+      foreach ($r in @($resp.responses)) {
+        $rid = "$($r.id)"; $status = [int]$r.status
+        if (($status -eq 429 -or $status -ge 500) -and $attempt -lt 4) {
+          $retry += ($chunk | Where-Object { "$($_.id)" -eq $rid })
+        } else {
+          $results[$rid] = $r.body
+        }
+      }
+      $chunk = @($retry)
+      if ($chunk.Count -gt 0) { Start-Sleep -Seconds ([math]::Min(30, [math]::Pow(2, $attempt))) }
+    }
+    $done += 20
+    Write-ProgressBar -Current ([math]::Min($done, $items.Count)) -Total $items.Count -Activity $Activity -Status "batched"
+  }
+  Write-Progress -Activity $Activity -Completed
+  return $results
+}
+
+# ── Helper: Get-LastSignIn ──
+# The servicePrincipalSignInActivities report exposes 5 timestamps per app:
+# delegated (user) / app-only (daemon), each as client or resource, plus an overall
+# lastSignInActivity. We take the most recent across ALL of them (so daemon/app-only
+# and user-delegated sign-ins are both covered) and report which flow it was.
+function Get-LastSignIn {
+  param($activity)
+  if (-not $activity) { return @{ DateTime = $null; Flow = $null } }
+  $cands = @(
+    @{ F = 'Delegated (user)';     V = $activity.delegatedClientSignInActivity },
+    @{ F = 'Delegated (resource)'; V = $activity.delegatedResourceSignInActivity },
+    @{ F = 'App-only (daemon)';    V = $activity.applicationAuthenticationClientSignInActivity },
+    @{ F = 'App-only (resource)';  V = $activity.applicationAuthenticationResourceSignInActivity },
+    @{ F = 'Unknown';              V = $activity.lastSignInActivity }
+  )
+  $bestRaw = $null; $bestDt = $null; $bestFlow = $null
+  foreach ($c in $cands) {
+    $raw = if ($c.V -and $c.V.lastSignInDateTime) { $c.V.lastSignInDateTime } else { $null }
+    if (-not $raw) { continue }
+    try { $dt = [datetime]$raw } catch { continue }
+    if (-not $bestDt -or $dt -gt $bestDt) { $bestDt = $dt; $bestRaw = $raw; $bestFlow = $c.F }
+  }
+  return @{ DateTime = $bestRaw; Flow = $bestFlow }
+}
+
 # ── Helper: Confirm-WriteAccess ──
 # Called only when the user picks an action. Elevates the Graph session to
 # Application.ReadWrite.All on demand. Returns $false (no error) if the user
@@ -284,22 +351,15 @@ switch ($staleChoice) {
 }
 Write-Host "  -> Stale threshold: $StaleDays days" -ForegroundColor Green
 
-# ── Step 4: Include / exclude Microsoft first-party apps ──
-Write-Host ""
-Write-Host "  Include Microsoft-published (first-party) apps?" -ForegroundColor White
-Write-Host "    [1]  Exclude first-party apps (default)" -ForegroundColor Green
-Write-Host "    [2]  Include all" -ForegroundColor Yellow
-Write-Host ""
-$msChoice = Read-Host "  Enter choice (1-2) [default: 1]"
-$IncludeFirstParty = ($msChoice -eq "2")
-Write-Host "  -> $(if ($IncludeFirstParty) { 'Including' } else { 'Excluding' }) Microsoft first-party apps" -ForegroundColor Green
+# ── (Scope is chosen after connecting — see the object-type prompt below, ──
+#     which shows live counts per type so you can pick what to audit.) ──
 
 # ── Summary & confirm ──
 Write-Host ""
 Write-Host "  --------------------------------------" -ForegroundColor Gray
 Write-Host "  Expiry warning:   $WarningDays days" -ForegroundColor White
 Write-Host "  Stale threshold:  $StaleDays days" -ForegroundColor White
-Write-Host "  First-party apps: $(if ($IncludeFirstParty) { 'Included' } else { 'Excluded' })" -ForegroundColor White
+Write-Host "  Scope:            chosen after connect (with live counts)" -ForegroundColor White
 Write-Host "  Flow:             Audit -> Review -> Optionally act (gated)" -ForegroundColor Gray
 Write-Host "  --------------------------------------" -ForegroundColor Gray
 Write-Host ""
@@ -317,7 +377,7 @@ $warningDate = $now.AddDays($WarningDays)
 $cutoffDate  = $now.AddDays(-$StaleDays).ToUniversalTime()
 
 # ── Phase 1: Connect ──
-$totalPhases = 6
+$totalPhases = 7
 $phase = 1
 Write-Host ""
 Write-Host "  [$phase/$totalPhases] Connecting to Microsoft Graph..." -ForegroundColor Cyan
@@ -369,7 +429,7 @@ $appRegs = Invoke-GraphPaged "https://graph.microsoft.com/v1.0/applications?`$to
 Write-Host "    -> $($appRegs.Count) app registrations" -ForegroundColor Green
 
 Write-Host "    - Service principals..." -ForegroundColor Gray
-$sps = Invoke-GraphPaged "https://graph.microsoft.com/v1.0/servicePrincipals?`$top=999&`$select=id,appId,displayName,accountEnabled,servicePrincipalType,appOwnerOrganizationId"
+$sps = Invoke-GraphPaged "https://graph.microsoft.com/v1.0/servicePrincipals?`$top=999&`$select=id,appId,displayName,accountEnabled,servicePrincipalType,appOwnerOrganizationId,keyCredentials,passwordCredentials"
 Write-Host "    -> $($sps.Count) service principals" -ForegroundColor Green
 $spByAppId = @{}
 foreach ($sp in $sps) { if ($sp.appId) { $spByAppId[$sp.appId] = $sp } }
@@ -387,7 +447,76 @@ try {
 }
 $activityByAppId = @{}
 foreach ($a in $signInActivity) { if ($a.appId) { $activityByAppId[$a.appId] = $a } }
+
+# Delegated permission grants (consented OAuth2 scopes) — fetched once, tenant-wide,
+# then grouped by the client SP so each enterprise app knows what it was granted.
+Write-Host "    - Enterprise app delegated grants (OAuth2)..." -ForegroundColor Gray
+try {
+  $oauthGrants = Invoke-GraphPaged "https://graph.microsoft.com/v1.0/oauth2PermissionGrants?`$top=999"
+  Write-Host "    -> $($oauthGrants.Count) delegated grant record(s)" -ForegroundColor Green
+} catch {
+  Write-Host "  [!] Could not fetch OAuth2 grants: $($_.Exception.Message)" -ForegroundColor Yellow
+  $oauthGrants = @()
+}
+$grantsByClient = @{}
+foreach ($g in $oauthGrants) {
+  if (-not $g.clientId) { continue }
+  if (-not $grantsByClient.ContainsKey($g.clientId)) { $grantsByClient[$g.clientId] = @() }
+  $grantsByClient[$g.clientId] += $g
+}
+# SP object lookup by objectId (resource resolution) and the set of appIds that have a local app registration.
+$spById = @{}
+foreach ($sp in $sps) { if ($sp.id) { $spById[$sp.id] = $sp } }
+$appRegAppIds = @{}
+foreach ($app in $appRegs) { if ($app.appId) { $appRegAppIds[$app.appId] = $true } }
 $script:swPhase.Stop()
+
+# ── Scope: pick which object types to audit (live counts from this tenant) ──
+# Enterprise apps (service principals) are split by who owns them so you can, e.g.,
+# audit only the external apps users consented to and skip the Microsoft noise.
+function Get-SpCategory($sp) {
+  if ("$($sp.servicePrincipalType)" -eq 'ManagedIdentity') { return 'ManagedId' }
+  if ($sp.appOwnerOrganizationId -eq $msFirstPartyTenantId)  { return 'MS' }
+  if ($sp.appOwnerOrganizationId -eq $tenantId)              { return 'Org' }
+  return 'ThirdParty'
+}
+$catCount = @{ MS = 0; Org = 0; ThirdParty = 0; ManagedId = 0 }
+foreach ($sp in $sps) { $catCount[(Get-SpCategory $sp)]++ }
+
+Write-Host ""
+Write-Host "  What should this scan audit?  (live counts from your tenant)" -ForegroundColor White
+Write-Host "    [1]  App registrations             $("{0,5}" -f $appRegs.Count)   Entra > App registrations (apps built in your tenant)" -ForegroundColor Green
+Write-Host "    [2]  Enterprise apps - your org     $("{0,5}" -f $catCount.Org)   Entra > Enterprise applications (single-tenant apps your org created)" -ForegroundColor Green
+Write-Host "    [3]  Enterprise apps - third-party  $("{0,5}" -f $catCount.ThirdParty)   external apps users consented to (top consent-phishing risk)" -ForegroundColor Green
+Write-Host "    [4]  Enterprise apps - Microsoft    $("{0,5}" -f $catCount.MS)   Microsoft first-party apps (usually noise; slower)" -ForegroundColor Yellow
+Write-Host "    [5]  Managed identities            $("{0,5}" -f $catCount.ManagedId)   Azure managed identities" -ForegroundColor Yellow
+Write-Host "    [6]  All of the above            $("{0,5}" -f ($appRegs.Count + $catCount.Org + $catCount.ThirdParty + $catCount.MS + $catCount.ManagedId))   everything (slower)" -ForegroundColor Yellow
+$scopeInput = Read-Host "  Enter choices, comma-separated (e.g. 1,3), 6 or 'all' for everything [default: 1,2,3]"
+if (-not $scopeInput -or $scopeInput.Trim() -eq '') { $scopeInput = '1,2,3' }
+if ($scopeInput -match '(?i)\ball\b' -or (@($scopeInput -split '[,\s]+') -contains '6')) {
+  $scopeSel = @(1,2,3,4,5)
+} else {
+  $scopeSel = @($scopeInput -split '[,\s]+' | Where-Object { $_ -match '^[1-5]$' } | ForEach-Object { [int]$_ } | Sort-Object -Unique)
+  if ($scopeSel.Count -eq 0) { Write-Host "  [!] No valid choice — using default 1,2,3." -ForegroundColor Yellow; $scopeSel = @(1,2,3) }
+}
+$doAppRegs       = $scopeSel -contains 1
+$doEntOrg        = $scopeSel -contains 2
+$doEntThirdParty = $scopeSel -contains 3
+$doEntMS         = $scopeSel -contains 4
+$doManagedId     = $scopeSel -contains 5
+$doEnt           = $doEntOrg -or $doEntThirdParty -or $doEntMS -or $doManagedId
+
+$scopeLabels = @()
+if ($doAppRegs)       { $scopeLabels += "App regs ($($appRegs.Count))" }
+if ($doEntOrg)        { $scopeLabels += "Ent:org ($($catCount.Org))" }
+if ($doEntThirdParty) { $scopeLabels += "Ent:third-party ($($catCount.ThirdParty))" }
+if ($doEntMS)         { $scopeLabels += "Ent:Microsoft ($($catCount.MS))" }
+if ($doManagedId)     { $scopeLabels += "Managed IDs ($($catCount.ManagedId))" }
+$scopeSummary = if ($scopeLabels.Count) { $scopeLabels -join ', ' } else { 'None' }
+Write-Host "  -> Scope: $scopeSummary" -ForegroundColor Green
+if ($doEntMS -and $catCount.MS -gt 200) {
+  Write-Host "  [i] Auditing $($catCount.MS) Microsoft apps means a Graph call each — this can take several minutes." -ForegroundColor Yellow
+}
 
 # ── Phase 3: Resolve permission names from resource service principals ──
 $phase++
@@ -464,7 +593,7 @@ function Resolve-Permissions {
 }
 
 function Get-CredentialBuckets {
-  param($app, $portalUrl)
+  param($app, $portalUrl, $source = 'App reg')
   $out = @()
   foreach ($pair in @(
       @{ Set = $app.keyCredentials;      Kind = 'Certificate'   },
@@ -484,7 +613,7 @@ function Get-CredentialBuckets {
         Description = if ($c.displayName) { $c.displayName } else { "N/A" }
         KeyId = $c.keyId
         StartDate = $startDate.ToString('yyyy-MM-dd'); EndDate = $endDate.ToString('yyyy-MM-dd')
-        DaysToExpiry = $days; Status = $status; PortalUrl = $portalUrl; Owner = "N/A"
+        DaysToExpiry = $days; Status = $status; PortalUrl = $portalUrl; Owner = "N/A"; Source = $source
       }
     }
   }
@@ -500,11 +629,11 @@ foreach ($app in $appRegs) {
     Write-ProgressBar -Current $i -Total $total -Activity "Analyzing apps" -Status $app.displayName
   }
 
+  if (-not $doAppRegs) { continue }
   $sp = if ($app.appId -and $spByAppId.ContainsKey($app.appId)) { $spByAppId[$app.appId] } else { $null }
   $isFirstParty = $false
   if ($sp -and $sp.appOwnerOrganizationId -eq $msFirstPartyTenantId) { $isFirstParty = $true }
   if ($app.publisherDomain -match '(microsoft\.com|microsoft\.onmicrosoft\.com)$') { $isFirstParty = $true }
-  if ($isFirstParty -and -not $IncludeFirstParty) { continue }
 
   $portalUrl = "https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationMenuBlade/~/Overview/appId/$($app.appId)"
 
@@ -515,6 +644,10 @@ foreach ($app in $appRegs) {
   $lowP  = @($perms | Where-Object { $_.Risk -eq 'Low' })
   $overallRisk = if ($highP.Count) { 'High' } elseif ($medP.Count) { 'Medium' } elseif ($lowP.Count) { 'Low' } else { 'None' }
   $sensitiveList = (@($highP + $medP) | ForEach-Object { "$($_.Resource): $($_.Name) ($($_.Type))" }) -join "`n"
+  # Distinct API products this app touches (all perms) + a flat string of every
+  # permission name, so the HTML report can filter by product and search details.
+  $permProducts  = @($perms | ForEach-Object { $_.Resource } | Where-Object { $_ } | Sort-Object -Unique)
+  $permNames     = (@($perms | ForEach-Object { $_.Name }) -join ' ')
 
   # Credentials
   $creds = Get-CredentialBuckets $app $portalUrl
@@ -522,9 +655,10 @@ foreach ($app in $appRegs) {
   $expiredN  = @($creds | Where-Object { $_.Status -eq 'Expired' }).Count
   $expiringN = @($creds | Where-Object { $_.Status -eq 'Expiring Soon' }).Count
 
-  # Staleness
+  # Staleness — most recent sign-in across all flows (delegated + app-only)
   $activity   = if ($app.appId -and $activityByAppId.ContainsKey($app.appId)) { $activityByAppId[$app.appId] } else { $null }
-  $lastSignIn = if ($activity -and $activity.lastSignInActivity) { $activity.lastSignInActivity.lastSignInDateTime } else { $null }
+  $si = Get-LastSignIn $activity
+  $lastSignIn = $si.DateTime; $signInFlow = $si.Flow
   if (-not $sp) {
     $staleStatus = "No service principal"; $daysSince = $null
   } elseif ($signInActivity.Count -eq 0) {
@@ -556,9 +690,12 @@ foreach ($app in $appRegs) {
     LowCount       = $lowP.Count
     TotalPerms     = $perms.Count
     SensitivePerms = $sensitiveList
+    Products       = $permProducts
+    PermSearch     = $permNames
     StaleStatus    = $staleStatus
     DaysSinceLastSignIn = $daysSince
     LastSignIn     = $lastSignIn
+    SignInFlow     = $signInFlow
     TotalCreds     = $creds.Count
     ExpiredCreds   = $expiredN
     ExpiringCreds  = $expiringN
@@ -592,7 +729,184 @@ Write-Host "    Never used:           $($neverUsed.Count)" -ForegroundColor Gray
 Write-Host "    Workload ID (CA):     $($caCandidates.Count)  [+ $($idpOnly.Count) ID Protection only]" -ForegroundColor Gray
 $script:swPhase.Stop()
 
-# ── Phase 5: Resolve owners for apps that appear in the report ──
+# ── Phase 5: Analyze enterprise apps (actual GRANTED permissions) ──
+# App registrations above describe what an app *requests*. Enterprise apps
+# (service principals) are the identities that actually hold consented access —
+# including third-party / SaaS / gallery apps that have no local app registration.
+$phase++
+Write-Host ""
+Write-Host "  [$phase/$totalPhases] Analyzing enterprise apps (granted permissions, credentials, staleness)..." -ForegroundColor Cyan
+$script:swPhase = [System.Diagnostics.Stopwatch]::StartNew()
+
+# Resolve a resource SP's app-role ids -> permission values (cached by SP objectId).
+$resRolesByObjId = @{}
+function Get-ResourceRoleInfo {
+  param([string]$ObjId)
+  if (-not $ObjId) { return @{ Name = $null; Roles = @{} } }
+  if ($resRolesByObjId.ContainsKey($ObjId)) { return $resRolesByObjId[$ObjId] }
+  $name = if ($spById.ContainsKey($ObjId)) { $spById[$ObjId].displayName } else { $ObjId }
+  $roles = @{}
+  try {
+    $rsp = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/servicePrincipals/$ObjId`?`$select=displayName,appRoles" -ErrorAction Stop
+    if ($rsp.displayName) { $name = $rsp.displayName }
+    foreach ($ar in @($rsp.appRoles)) { if ($ar.id) { $roles[$ar.id.ToString()] = $ar.value } }
+  } catch { }
+  $info = @{ Name = $name; Roles = $roles }
+  $resRolesByObjId[$ObjId] = $info
+  return $info
+}
+
+# Pass 1 — which SPs are in scope (by the categories chosen at the scope prompt).
+$entTargets = @()
+foreach ($sp in $sps) {
+  $cat = Get-SpCategory $sp
+  $include = switch ($cat) { 'Org' { $doEntOrg } 'ThirdParty' { $doEntThirdParty } 'MS' { $doEntMS } 'ManagedId' { $doManagedId } default { $false } }
+  if ($include) { $entTargets += [PSCustomObject]@{ Sp = $sp; Cat = $cat } }
+}
+Write-Host "    - $($entTargets.Count) enterprise app(s) in scope; fetching grants in parallel batches..." -ForegroundColor Gray
+
+# Batch-fetch each in-scope SP's app-role assignments (application permissions), 20 per round trip.
+$asgReqs = @($entTargets | ForEach-Object { @{ id = "$($_.Sp.id)"; url = "/servicePrincipals/$($_.Sp.id)/appRoleAssignments?`$select=appRoleId,resourceId,resourceDisplayName&`$top=999" } })
+$asgBody = Invoke-GraphBatch -Requests $asgReqs -Activity "Fetching app-role assignments"
+
+# Pre-warm the resource app-role dictionaries for every distinct resource referenced (one batch).
+$resIds = [System.Collections.Generic.HashSet[string]]::new()
+foreach ($k in $asgBody.Keys) { foreach ($a in @($asgBody[$k].value)) { if ($a.resourceId) { [void]$resIds.Add("$($a.resourceId)") } } }
+$resReqs = @($resIds | ForEach-Object { @{ id = "$_"; url = "/servicePrincipals/$_`?`$select=id,displayName,appRoles" } })
+$resBody = Invoke-GraphBatch -Requests $resReqs -Activity "Resolving app-role names"
+foreach ($rid in $resBody.Keys) {
+  $b = $resBody[$rid]; $roles = @{}
+  $name = if ($spById.ContainsKey($rid)) { $spById[$rid].displayName } else { $rid }
+  if ($b) { if ($b.displayName) { $name = $b.displayName }; foreach ($ar in @($b.appRoles)) { if ($ar.id) { $roles[$ar.id.ToString()] = $ar.value } } }
+  $resRolesByObjId[$rid] = @{ Name = $name; Roles = $roles }
+}
+
+$entAnalysis = @()
+$entCreds = @()
+$ei = 0; $etotal = $entTargets.Count
+foreach ($t in $entTargets) {
+  $ei++
+  $sp = $t.Sp; $cat = $t.Cat
+  if (($ei % 25) -eq 0 -or $ei -eq $etotal) { Write-ProgressBar -Current $ei -Total $etotal -Activity "Analyzing enterprise apps" -Status $sp.displayName }
+  $isFirstParty = ($cat -eq 'MS')
+
+  $portalUrl = "https://entra.microsoft.com/#view/Microsoft_AAD_Managed/ManagedAppMenuBlade/~/Permissions/objectId/$($sp.id)/appId/$($sp.appId)"
+
+  # --- Granted permissions ---
+  $perms = @()
+  # Delegated (consented OAuth2 scopes) — scope values are already human-readable.
+  foreach ($g in @($grantsByClient[$sp.id])) {
+    if (-not $g) { continue }
+    $resName = if ($g.resourceId -and $spById.ContainsKey($g.resourceId)) { $spById[$g.resourceId].displayName } else { $g.resourceId }
+    foreach ($scope in @(("$($g.scope)").Trim() -split '\s+')) {
+      if (-not $scope) { continue }
+      $perms += [PSCustomObject]@{ Resource = $resName; Name = $scope; Type = 'Delegated'; Risk = (Get-PermissionRisk -Name $scope -Type 'Delegated') }
+    }
+  }
+  # Application (app roles the SP has been granted) — from the pre-fetched batch.
+  $assignments = @($asgBody["$($sp.id)"].value)
+  foreach ($asg in @($assignments)) {
+    if (-not $asg) { continue }
+    $roleKey = "$($asg.appRoleId)"
+    if (-not $roleKey -or $roleKey -eq '00000000-0000-0000-0000-000000000000') { continue }   # default access, no permission
+    $rinfo = Get-ResourceRoleInfo -ObjId "$($asg.resourceId)"
+    $resName = if ($asg.resourceDisplayName) { $asg.resourceDisplayName } elseif ($rinfo.Name) { $rinfo.Name } else { $asg.resourceId }
+    $pname = if ($rinfo.Roles.ContainsKey($roleKey)) { $rinfo.Roles[$roleKey] } else { "($roleKey)" }
+    $perms += [PSCustomObject]@{ Resource = $resName; Name = $pname; Type = 'Application'; Risk = (Get-PermissionRisk -Name $pname -Type 'Application') }
+  }
+
+  $highP = @($perms | Where-Object { $_.Risk -eq 'High' })
+  $medP  = @($perms | Where-Object { $_.Risk -eq 'Medium' })
+  $lowP  = @($perms | Where-Object { $_.Risk -eq 'Low' })
+  $overallRisk = if ($highP.Count) { 'High' } elseif ($medP.Count) { 'Medium' } elseif ($lowP.Count) { 'Low' } else { 'None' }
+  $sensitiveList = (@($highP + $medP) | ForEach-Object { "$($_.Resource): $($_.Name) ($($_.Type))" }) -join "`n"
+  $permProducts  = @($perms | ForEach-Object { $_.Resource } | Where-Object { $_ } | Sort-Object -Unique)
+  $permNames     = (@($perms | ForEach-Object { $_.Name }) -join ' ')
+
+  # --- Credentials on the SP (SAML signing certs, secrets) ---
+  $creds = Get-CredentialBuckets $sp $portalUrl 'Enterprise'
+  $entCreds += $creds
+  $expiredN  = @($creds | Where-Object { $_.Status -eq 'Expired' }).Count
+  $expiringN = @($creds | Where-Object { $_.Status -eq 'Expiring Soon' }).Count
+
+  # --- Staleness --- most recent sign-in across all flows (delegated + app-only)
+  $activity   = if ($sp.appId -and $activityByAppId.ContainsKey($sp.appId)) { $activityByAppId[$sp.appId] } else { $null }
+  $si = Get-LastSignIn $activity
+  $lastSignIn = $si.DateTime; $signInFlow = $si.Flow
+  if ($cat -eq 'ManagedId' -and -not $lastSignIn) {
+    # Managed identity token use largely isn't captured by this report — don't call it "Never used".
+    $staleStatus = "N/A (not tracked)"; $daysSince = $null
+  } elseif ($signInActivity.Count -eq 0) { $staleStatus = "Unknown"; $daysSince = $null }
+  elseif (-not $lastSignIn)        { $staleStatus = "Never used"; $daysSince = $null }
+  else {
+    $lastDt = [datetime]$lastSignIn
+    $daysSince = [int]((Get-Date) - $lastDt).TotalDays
+    $staleStatus = if ($lastDt -lt $cutoffDate) { "Stale" } else { "Active" }
+  }
+
+  $entAnalysis += [PSCustomObject]@{
+    DisplayName    = $sp.displayName
+    AppId          = $sp.appId
+    SPObjectId     = $sp.id
+    SPEnabled      = [bool]$sp.accountEnabled
+    SPType         = "$($sp.servicePrincipalType)"
+    FirstParty     = $isFirstParty
+    Category       = switch ($cat) { 'Org' { 'Your org' } 'ThirdParty' { 'Third-party' } 'MS' { 'Microsoft' } 'ManagedId' { 'Managed identity' } default { $cat } }
+    HasAppReg      = if ($sp.appId -and $appRegAppIds.ContainsKey($sp.appId)) { $true } else { $false }
+    Tenancy        = if ($isFirstParty) { 'Microsoft' } elseif ($sp.appOwnerOrganizationId -eq $tenantId) { 'Tenant' } else { 'Tenant/External' }
+    OverallRisk    = $overallRisk
+    HighCount      = $highP.Count
+    MedCount       = $medP.Count
+    LowCount       = $lowP.Count
+    TotalPerms     = $perms.Count
+    SensitivePerms = $sensitiveList
+    Products       = $permProducts
+    PermSearch     = $permNames
+    StaleStatus    = $staleStatus
+    DaysSinceLastSignIn = $daysSince
+    LastSignIn     = $lastSignIn
+    SignInFlow     = $signInFlow
+    TotalCreds     = $creds.Count
+    ExpiredCreds   = $expiredN
+    ExpiringCreds  = $expiringN
+    Owner          = "N/A"
+    PortalLink     = $portalUrl
+  }
+}
+Write-Progress -Activity "Analyzing enterprise apps" -Completed
+
+# Owners for the enterprise apps that surface in the report — batched.
+$entReport = @($entAnalysis | Where-Object {
+  $_.OverallRisk -in @('High','Medium') -or $_.ExpiredCreds -gt 0 -or $_.ExpiringCreds -gt 0 -or $_.StaleStatus -in @('Stale','Never used')
+})
+$entOwnReqs = @($entReport | ForEach-Object { @{ id = "$($_.SPObjectId)"; url = "/servicePrincipals/$($_.SPObjectId)/owners?`$select=displayName,userPrincipalName" } })
+$entOwnBody = Invoke-GraphBatch -Requests $entOwnReqs -Activity "Fetching enterprise app owners"
+foreach ($e in $entReport) {
+  $ob = $entOwnBody["$($e.SPObjectId)"]
+  if ($ob -and $ob.value -and @($ob.value).Count -gt 0) {
+    $e.Owner = (@($ob.value) | ForEach-Object { if ($_.displayName) { $_.displayName } elseif ($_.userPrincipalName) { $_.userPrincipalName } else { "Unknown" } }) -join ", "
+  } elseif ($null -eq $ob) { $e.Owner = "N/A" } else { $e.Owner = "No owner" }
+}
+$entOwnerByObjId = @{}
+foreach ($e in $entAnalysis) { $entOwnerByObjId[$e.SPObjectId] = $e.Owner }
+foreach ($c in $entCreds) { if ($c.ObjectId -and $entOwnerByObjId.ContainsKey($c.ObjectId)) { $c.Owner = $entOwnerByObjId[$c.ObjectId] } }
+
+$entHigh     = @($entAnalysis | Where-Object { $_.OverallRisk -eq 'High' })
+$entMed      = @($entAnalysis | Where-Object { $_.OverallRisk -eq 'Medium' })
+$entStale    = @($entAnalysis | Where-Object { $_.StaleStatus -eq 'Stale' })
+$entNoAppReg = @($entAnalysis | Where-Object { -not $_.HasAppReg })
+$entExpired  = @($entCreds | Where-Object { $_.Status -eq 'Expired' } | Sort-Object DaysToExpiry)
+$entExpiring = @($entCreds | Where-Object { $_.Status -eq 'Expiring Soon' } | Sort-Object DaysToExpiry)
+
+Write-Host ""
+Write-Host "  Enterprise apps:" -ForegroundColor White
+Write-Host "    Analyzed:             $($entAnalysis.Count)  (no app registration: $($entNoAppReg.Count))" -ForegroundColor White
+Write-Host "    HIGH-risk grants:     $($entHigh.Count)" -ForegroundColor $(if ($entHigh.Count) { 'Red' } else { 'Green' })
+Write-Host "    MEDIUM-risk grants:   $($entMed.Count)" -ForegroundColor $(if ($entMed.Count) { 'Yellow' } else { 'Green' })
+Write-Host "    Stale:                $($entStale.Count)" -ForegroundColor Gray
+$script:swPhase.Stop()
+
+# ── Phase 6: Resolve owners for apps that appear in the report ──
 $phase++
 Write-Host ""
 Write-Host "  [$phase/$totalPhases] Resolving owners..." -ForegroundColor Cyan
@@ -603,27 +917,23 @@ $reportApps = @($analysis | Where-Object {
   $_.StaleStatus -in @('Stale','Never used','No service principal')
 })
 $ownerCache = @{}
-$oi = 0
+$ownReqs = @($reportApps | Where-Object { $_.ObjectId } | ForEach-Object { @{ id = "$($_.ObjectId)"; url = "/applications/$($_.ObjectId)/owners?`$select=displayName,userPrincipalName" } })
+$ownBody = Invoke-GraphBatch -Requests $ownReqs -Activity "Fetching owners"
 foreach ($a in $reportApps) {
-  $oi++
-  Write-ProgressBar -Current $oi -Total $reportApps.Count -Activity "Fetching owners" -Status $a.DisplayName
   if ($ownerCache.ContainsKey($a.ObjectId)) { continue }
-  try {
-    $owners = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/applications/$($a.ObjectId)/owners?`$select=displayName,userPrincipalName" -ErrorAction Stop
-    if ($owners.value -and $owners.value.Count -gt 0) {
-      $ownerCache[$a.ObjectId] = ($owners.value | ForEach-Object {
-        if ($_.displayName) { $_.displayName } elseif ($_.userPrincipalName) { $_.userPrincipalName } else { "Unknown" }
-      }) -join ", "
-    } else { $ownerCache[$a.ObjectId] = "No owner" }
-  } catch { $ownerCache[$a.ObjectId] = "N/A" }
+  $ob = $ownBody["$($a.ObjectId)"]
+  if ($ob -and $ob.value -and @($ob.value).Count -gt 0) {
+    $ownerCache[$a.ObjectId] = (@($ob.value) | ForEach-Object {
+      if ($_.displayName) { $_.displayName } elseif ($_.userPrincipalName) { $_.userPrincipalName } else { "Unknown" }
+    }) -join ", "
+  } elseif ($null -eq $ob) { $ownerCache[$a.ObjectId] = "N/A" } else { $ownerCache[$a.ObjectId] = "No owner" }
 }
-Write-Progress -Activity "Fetching owners" -Completed
 foreach ($a in $analysis)  { if ($ownerCache.ContainsKey($a.ObjectId)) { $a.Owner = $ownerCache[$a.ObjectId] } }
 foreach ($c in $allCreds)  { if ($ownerCache.ContainsKey($c.ObjectId)) { $c.Owner = $ownerCache[$c.ObjectId] } }
 Write-Host "  Owners resolved for $($reportApps.Count) app(s)" -ForegroundColor Green
 $script:swPhase.Stop()
 
-# ── Phase 6: Review & act (gated) ──
+# ── Phase 7: Review & act (gated) ──
 $phase++
 Write-Host ""
 Write-Host "  [$phase/$totalPhases] Review & decide" -ForegroundColor Cyan
@@ -797,6 +1107,20 @@ function Set-WlidCell($cell, [string]$val) {
     default               { Set-Fill $cell $GRAY_BG;  Set-Font $cell -color $GRAY_TEXT }
   }
 }
+# Enabled/disabled = enterprise-app (service principal) accountEnabled.
+function Get-EnabledLabel($v) { if ($v -eq $true) { 'Enabled' } elseif ($v -eq $false) { 'Disabled' } else { 'No SP' } }
+function Set-EnabledCell($cell, [string]$val) {
+  $cell.Style.HorizontalAlignment = [OfficeOpenXml.Style.ExcelHorizontalAlignment]::Center
+  switch ($val) {
+    'Enabled'  { Set-Fill $cell $GREEN_BG; Set-Font $cell -color $GREEN_TEXT }
+    'Disabled' { Set-Fill $cell $AMBER_BG; Set-Font $cell -bold $true -color $AMBER_TEXT }
+    default    { Set-Fill $cell $GRAY_BG;  Set-Font $cell -color $GRAY_TEXT }
+  }
+}
+# App enabled/disabled state keyed by appId — used by Excel (below) and the HTML report.
+$appStateByAppId = @{}
+foreach ($a in $analysis) { $appStateByAppId[$a.AppId] = Get-EnabledLabel $a.SPEnabled }
+foreach ($e in $entAnalysis) { if ($e.AppId -and -not $appStateByAppId.ContainsKey($e.AppId)) { $appStateByAppId[$e.AppId] = Get-EnabledLabel $e.SPEnabled } }
 
 $excel = New-Object OfficeOpenXml.ExcelPackage
 
@@ -812,7 +1136,7 @@ Set-Font $ws.Cells["B2"] -size 18 -bold $true -color $WHITE_C
 $ws.Cells["B2"].Style.VerticalAlignment = [OfficeOpenXml.Style.ExcelVerticalAlignment]::Center
 $ws.Row(3).Height = 24; for ($c = 1; $c -le 6; $c++) { Set-Fill $ws.Cells[3, $c] $DARK_BLUE }
 $ws.Cells["B3:F3"].Merge = $true
-$ws.Cells["B3"].Value = "Tenant: $tenantId  |  Expiry: $WarningDays d  |  Stale: $StaleDays d  |  Action: $actionMode  |  $(Get-Date -Format 'yyyy-MM-dd HH:mm')"
+$ws.Cells["B3"].Value = "Tenant: $tenantId  |  Scope: $scopeSummary  |  Expiry: $WarningDays d  |  Stale: $StaleDays d  |  Action: $actionMode  |  $(Get-Date -Format 'yyyy-MM-dd HH:mm')"
 Set-Font $ws.Cells["B3"] -size 10 -color (HexColor "B0C4DE")
 
 $ws.Row(4).Height = 8; $ws.Row(5).Height = 60
@@ -867,15 +1191,15 @@ Set-Font $ws.Cells["B$row"] -size 9 -color $DARK_GRAY; $ws.Cells["B$row:F$row"].
 # ── Sheet 2: Permission Risk ──
 $ws2 = $excel.Workbook.Worksheets.Add("Permission Risk")
 $ws2.TabColor = HexColor "B91C1C"; $ws2.View.ShowGridLines = $false
-$pCols = @(2,32),@(3,24),@(4,11),@(5,6),@(6,6),@(7,6),@(8,14),@(9,19),@(10,50),@(11,34)
+$pCols = @(2,32),@(3,24),@(4,11),@(5,6),@(6,6),@(7,6),@(8,14),@(9,12),@(10,19),@(11,50),@(12,34)
 $ws2.Column(1).Width = 2; foreach ($pc in $pCols) { $ws2.Column($pc[0]).Width = $pc[1] }
-$ws2.Row(1).Height = 8; for ($c = 1; $c -le 11; $c++) { Set-Fill $ws2.Cells[1,$c] $NAVY }
-$ws2.Row(2).Height = 32; for ($c = 1; $c -le 11; $c++) { Set-Fill $ws2.Cells[2,$c] $NAVY }
-$ws2.Cells["B2:K2"].Merge = $true; $ws2.Cells["B2"].Value = "API PERMISSION RISK (overall = highest-risk permission)"
+$ws2.Row(1).Height = 8; for ($c = 1; $c -le 12; $c++) { Set-Fill $ws2.Cells[1,$c] $NAVY }
+$ws2.Row(2).Height = 32; for ($c = 1; $c -le 12; $c++) { Set-Fill $ws2.Cells[2,$c] $NAVY }
+$ws2.Cells["B2:L2"].Merge = $true; $ws2.Cells["B2"].Value = "API PERMISSION RISK (overall = highest-risk permission)"
 Set-Font $ws2.Cells["B2"] -size 16 -bold $true -color $WHITE_C
 $ws2.Cells["B2"].Style.VerticalAlignment = [OfficeOpenXml.Style.ExcelVerticalAlignment]::Center
 $hdrRow = 4; $ws2.Row($hdrRow).Height = 28
-$headers2 = @("App Name","Owner","Risk","High","Med","Low","Tenancy","Workload ID","Sensitive Permissions","Portal Link")
+$headers2 = @("App Name","Owner","Risk","High","Med","Low","Tenancy","Enabled","Workload ID","Sensitive Permissions","Portal Link")
 for ($k = 0; $k -lt $headers2.Count; $k++) {
   $cell = $ws2.Cells[$hdrRow, ($k + 2)]; $cell.Value = $headers2[$k]
   Set-Fill $cell $ACCENT_BLUE; Set-Font $cell -bold $true -color $WHITE_C
@@ -888,29 +1212,32 @@ foreach ($a in @($analysis | Where-Object { $_.OverallRisk -ne 'None' } | Sort-O
   $ws2.Cells[$dataRow,4].Value = $a.OverallRisk; Set-RiskCell $ws2.Cells[$dataRow,4] $a.OverallRisk
   $ws2.Cells[$dataRow,5].Value = $a.HighCount; $ws2.Cells[$dataRow,6].Value = $a.MedCount; $ws2.Cells[$dataRow,7].Value = $a.LowCount
   $ws2.Cells[$dataRow,8].Value = $a.Tenancy
-  $ws2.Cells[$dataRow,9].Value = $a.WorkloadIdCand; Set-WlidCell $ws2.Cells[$dataRow,9] $a.WorkloadIdCand
-  $ws2.Cells[$dataRow,10].Value = $a.SensitivePerms; $ws2.Cells[$dataRow,10].Style.WrapText = $true
-  $ws2.Cells[$dataRow,11].Value = "Open in Entra"; $ws2.Cells[$dataRow,11].Hyperlink = [System.Uri]::new($a.PortalLink)
-  Set-Font $ws2.Cells[$dataRow,11] -color $ACCENT_BLUE; $ws2.Cells[$dataRow,11].Style.Font.UnderLine = $true
+  $enLbl = Get-EnabledLabel $a.SPEnabled
+  $ws2.Cells[$dataRow,9].Value = $enLbl; Set-EnabledCell $ws2.Cells[$dataRow,9] $enLbl
+  $ws2.Cells[$dataRow,10].Value = $a.WorkloadIdCand; Set-WlidCell $ws2.Cells[$dataRow,10] $a.WorkloadIdCand
+  $ws2.Cells[$dataRow,11].Value = $a.SensitivePerms; $ws2.Cells[$dataRow,11].Style.WrapText = $true
+  $ws2.Cells[$dataRow,12].Value = "Open in Entra"; $ws2.Cells[$dataRow,12].Hyperlink = [System.Uri]::new($a.PortalLink)
+  Set-Font $ws2.Cells[$dataRow,12] -color $ACCENT_BLUE; $ws2.Cells[$dataRow,12].Style.Font.UnderLine = $true
   foreach ($col in 5,6,7) { $ws2.Cells[$dataRow,$col].Style.HorizontalAlignment = [OfficeOpenXml.Style.ExcelHorizontalAlignment]::Center }
-  for ($col = 2; $col -le 11; $col++) { Set-ThinBorder $ws2.Cells[$dataRow,$col] }
-  if ($dataRow % 2 -eq 0) { foreach ($col in 2,3,8,10) { Set-Fill $ws2.Cells[$dataRow,$col] $ROW_ALT } }
-  $ws2.Cells[$dataRow,10].Style.VerticalAlignment = [OfficeOpenXml.Style.ExcelVerticalAlignment]::Top
+  for ($col = 2; $col -le 12; $col++) { Set-ThinBorder $ws2.Cells[$dataRow,$col] }
+  if ($dataRow % 2 -eq 0) { foreach ($col in 2,3,8,11) { Set-Fill $ws2.Cells[$dataRow,$col] $ROW_ALT } }
+  $ws2.Cells[$dataRow,11].Style.VerticalAlignment = [OfficeOpenXml.Style.ExcelVerticalAlignment]::Top
   $dataRow++
 }
+if ($dataRow -gt ($hdrRow + 1)) { $ws2.Cells[$hdrRow, 2, ($dataRow - 1), 12].AutoFilter = $true }
 
 # ── Helper to build a credentials sheet block ──
 function Add-CredSheet($name, $tab, $title, $rows) {
   $w = $excel.Workbook.Worksheets.Add($name); $w.TabColor = HexColor $tab; $w.View.ShowGridLines = $false
-  $cw = @(2,30),@(3,15),@(4,22),@(5,13),@(6,13),@(7,13),@(8,24),@(9,30)
+  $cw = @(2,30),@(3,15),@(4,22),@(5,13),@(6,13),@(7,13),@(8,24),@(9,12),@(10,14),@(11,30)
   $w.Column(1).Width = 2; foreach ($x in $cw) { $w.Column($x[0]).Width = $x[1] }
-  $w.Row(1).Height = 8; for ($c=1;$c-le9;$c++){ Set-Fill $w.Cells[1,$c] $NAVY }
-  $w.Row(2).Height = 32; for ($c=1;$c-le9;$c++){ Set-Fill $w.Cells[2,$c] $NAVY }
-  $w.Cells["B2:I2"].Merge = $true; $w.Cells["B2"].Value = $title
+  $w.Row(1).Height = 8; for ($c=1;$c-le11;$c++){ Set-Fill $w.Cells[1,$c] $NAVY }
+  $w.Row(2).Height = 32; for ($c=1;$c-le11;$c++){ Set-Fill $w.Cells[2,$c] $NAVY }
+  $w.Cells["B2:K2"].Merge = $true; $w.Cells["B2"].Value = $title
   Set-Font $w.Cells["B2"] -size 16 -bold $true -color $WHITE_C
   $w.Cells["B2"].Style.VerticalAlignment = [OfficeOpenXml.Style.ExcelVerticalAlignment]::Center
   $hr = 4; $w.Row($hr).Height = 28
-  $hs = @("App Name","Type","Description","Start","End","Days","Owner","Portal Link")
+  $hs = @("App Name","Type","Description","Start","End","Days","Owner","Enabled","Source","Portal Link")
   for ($k=0;$k-lt$hs.Count;$k++){ $cell=$w.Cells[$hr,($k+2)]; $cell.Value=$hs[$k]; Set-Fill $cell $ACCENT_BLUE; Set-Font $cell -bold $true -color $WHITE_C }
   $dr = $hr + 1
   foreach ($c in $rows) {
@@ -918,34 +1245,41 @@ function Add-CredSheet($name, $tab, $title, $rows) {
     $w.Cells[$dr,5].Value=$c.StartDate; $w.Cells[$dr,6].Value=$c.EndDate
     $w.Cells[$dr,7].Value= if ($c.Status -eq 'Expired') { [math]::Abs($c.DaysToExpiry) } else { $c.DaysToExpiry }
     $w.Cells[$dr,8].Value=$c.Owner
-    $w.Cells[$dr,9].Value="Open in Entra"; $w.Cells[$dr,9].Hyperlink=[System.Uri]::new($c.PortalUrl)
-    Set-Font $w.Cells[$dr,9] -color $ACCENT_BLUE; $w.Cells[$dr,9].Style.Font.UnderLine=$true
+    $enLbl = if ($c.AppId -and $appStateByAppId.ContainsKey($c.AppId)) { $appStateByAppId[$c.AppId] } else { 'No SP' }
+    $w.Cells[$dr,9].Value=$enLbl; Set-EnabledCell $w.Cells[$dr,9] $enLbl
+    $w.Cells[$dr,10].Value=$c.Source; $w.Cells[$dr,10].Style.HorizontalAlignment=[OfficeOpenXml.Style.ExcelHorizontalAlignment]::Center
+    $w.Cells[$dr,11].Value="Open in Entra"; $w.Cells[$dr,11].Hyperlink=[System.Uri]::new($c.PortalUrl)
+    Set-Font $w.Cells[$dr,11] -color $ACCENT_BLUE; $w.Cells[$dr,11].Style.Font.UnderLine=$true
     $dc=$w.Cells[$dr,7]; $dc.Style.HorizontalAlignment=[OfficeOpenXml.Style.ExcelHorizontalAlignment]::Center
     if ($c.Status -eq 'Expired' -or $c.DaysToExpiry -le 7) { Set-Fill $dc $RED_BG; Set-Font $dc -color $RED_TEXT }
     elseif ($c.DaysToExpiry -le 14) { Set-Fill $dc $AMBER_BG; Set-Font $dc -color $AMBER_TEXT }
     else { Set-Fill $dc $GREEN_BG; Set-Font $dc -color $GREEN_TEXT }
-    for ($col=2;$col-le9;$col++){ Set-ThinBorder $w.Cells[$dr,$col] }
-    if ($dr % 2 -eq 0) { foreach ($col in 2,3,4,5,6,8) { Set-Fill $w.Cells[$dr,$col] $ROW_ALT } }
+    for ($col=2;$col-le11;$col++){ Set-ThinBorder $w.Cells[$dr,$col] }
+    if ($dr % 2 -eq 0) { foreach ($col in 2,3,4,5,6,8,10) { Set-Fill $w.Cells[$dr,$col] $ROW_ALT } }
     $dr++
   }
+  if ($dr -gt ($hr + 1)) { $w.Cells[$hr, 2, ($dr - 1), 11].AutoFilter = $true }
 }
-if ($expiredCreds.Count -gt 0)  { Add-CredSheet "Expired Creds"  "E74C3C" "EXPIRED CREDENTIALS" $expiredCreds }
-if ($expiringCreds.Count -gt 0) { Add-CredSheet "Expiring Creds" "E67E22" "EXPIRING SOON (within $WarningDays days)" $expiringCreds }
+# Credential sheets combine app-registration and enterprise-app credentials (Source column distinguishes them).
+$allExpiredCreds  = @($expiredCreds  + $entExpired  | Sort-Object DaysToExpiry)
+$allExpiringCreds = @($expiringCreds + $entExpiring | Sort-Object DaysToExpiry)
+if ($allExpiredCreds.Count -gt 0)  { Add-CredSheet "Expired Creds"  "E74C3C" "EXPIRED CREDENTIALS" $allExpiredCreds }
+if ($allExpiringCreds.Count -gt 0) { Add-CredSheet "Expiring Creds" "E67E22" "EXPIRING SOON (within $WarningDays days)" $allExpiringCreds }
 
 # ── Sheet: Stale & Unused ──
 $cleanupAll = @($staleApps + $neverUsed + $orphaned)
 if ($cleanupAll.Count -gt 0) {
   $ws5 = $excel.Workbook.Worksheets.Add("Stale & Unused")
   $ws5.TabColor = HexColor "7F8C8D"; $ws5.View.ShowGridLines = $false
-  $sc = @(2,32),@(3,18),@(4,14),@(5,16),@(6,10),@(7,24),@(8,30)
+  $sc = @(2,32),@(3,18),@(4,14),@(5,16),@(6,20),@(7,10),@(8,24),@(9,12),@(10,30)
   $ws5.Column(1).Width = 2; foreach ($x in $sc) { $ws5.Column($x[0]).Width = $x[1] }
-  $ws5.Row(1).Height = 8; for ($c=1;$c-le8;$c++){ Set-Fill $ws5.Cells[1,$c] $NAVY }
-  $ws5.Row(2).Height = 32; for ($c=1;$c-le8;$c++){ Set-Fill $ws5.Cells[2,$c] $NAVY }
-  $ws5.Cells["B2:H2"].Merge = $true; $ws5.Cells["B2"].Value = "STALE & UNUSED APPS"
+  $ws5.Row(1).Height = 8; for ($c=1;$c-le10;$c++){ Set-Fill $ws5.Cells[1,$c] $NAVY }
+  $ws5.Row(2).Height = 32; for ($c=1;$c-le10;$c++){ Set-Fill $ws5.Cells[2,$c] $NAVY }
+  $ws5.Cells["B2:J2"].Merge = $true; $ws5.Cells["B2"].Value = "STALE & UNUSED APPS"
   Set-Font $ws5.Cells["B2"] -size 16 -bold $true -color $WHITE_C
   $ws5.Cells["B2"].Style.VerticalAlignment = [OfficeOpenXml.Style.ExcelVerticalAlignment]::Center
   $hr = 4; $ws5.Row($hr).Height = 28
-  $hs = @("App Name","Status","Days Since","Last Sign-In","Creds","Owner","Portal Link")
+  $hs = @("App Name","Activity","Days Since","Last Sign-In","Last Flow","Creds","Owner","Enabled","Portal Link")
   for ($k=0;$k-lt$hs.Count;$k++){ $cell=$ws5.Cells[$hr,($k+2)]; $cell.Value=$hs[$k]; Set-Fill $cell $ACCENT_BLUE; Set-Font $cell -bold $true -color $WHITE_C }
   $dr = $hr + 1
   foreach ($a in @($cleanupAll | Sort-Object @{E='DaysSinceLastSignIn';Descending=$true})) {
@@ -953,20 +1287,69 @@ if ($cleanupAll.Count -gt 0) {
     $ws5.Cells[$dr,3].Value=$a.StaleStatus
     $ws5.Cells[$dr,4].Value= if ($null -ne $a.DaysSinceLastSignIn) { $a.DaysSinceLastSignIn } else { "—" }
     $ws5.Cells[$dr,5].Value= if ($a.LastSignIn) { ([datetime]$a.LastSignIn).ToString('yyyy-MM-dd') } else { "—" }
-    $ws5.Cells[$dr,6].Value=$a.TotalCreds
-    $ws5.Cells[$dr,7].Value=$a.Owner
-    $ws5.Cells[$dr,8].Value="Open in Entra"; $ws5.Cells[$dr,8].Hyperlink=[System.Uri]::new($a.PortalLink)
-    Set-Font $ws5.Cells[$dr,8] -color $ACCENT_BLUE; $ws5.Cells[$dr,8].Style.Font.UnderLine=$true
+    $ws5.Cells[$dr,6].Value= if ($a.SignInFlow) { $a.SignInFlow } else { "—" }
+    $ws5.Cells[$dr,7].Value=$a.TotalCreds
+    $ws5.Cells[$dr,8].Value=$a.Owner
+    $enLbl = Get-EnabledLabel $a.SPEnabled
+    $ws5.Cells[$dr,9].Value=$enLbl; Set-EnabledCell $ws5.Cells[$dr,9] $enLbl
+    $ws5.Cells[$dr,10].Value="Open in Entra"; $ws5.Cells[$dr,10].Hyperlink=[System.Uri]::new($a.PortalLink)
+    Set-Font $ws5.Cells[$dr,10] -color $ACCENT_BLUE; $ws5.Cells[$dr,10].Style.Font.UnderLine=$true
     $sCell=$ws5.Cells[$dr,3]; $sCell.Style.HorizontalAlignment=[OfficeOpenXml.Style.ExcelHorizontalAlignment]::Center
     switch ($a.StaleStatus) {
       'Stale'      { Set-Fill $sCell $AMBER_BG; Set-Font $sCell -color $AMBER_TEXT }
       'Never used' { Set-Fill $sCell $RED_BG;   Set-Font $sCell -color $RED_TEXT }
       default      { Set-Fill $sCell $GRAY_BG;  Set-Font $sCell -color $GRAY_TEXT }
     }
-    for ($col=2;$col-le8;$col++){ Set-ThinBorder $ws5.Cells[$dr,$col] }
-    if ($dr % 2 -eq 0) { foreach ($col in 2,4,5,6,7) { Set-Fill $ws5.Cells[$dr,$col] $ROW_ALT } }
+    for ($col=2;$col-le10;$col++){ Set-ThinBorder $ws5.Cells[$dr,$col] }
+    if ($dr % 2 -eq 0) { foreach ($col in 2,4,5,6,7,8) { Set-Fill $ws5.Cells[$dr,$col] $ROW_ALT } }
     $dr++
   }
+  if ($dr -gt ($hr + 1)) { $ws5.Cells[$hr, 2, ($dr - 1), 10].AutoFilter = $true }
+}
+
+# ── Sheet: Enterprise Apps (actual granted permissions) ──
+$entWithPerms = @($entAnalysis | Where-Object { $_.OverallRisk -ne 'None' })
+if ($entWithPerms.Count -gt 0) {
+  $ws7 = $excel.Workbook.Worksheets.Add("Enterprise Apps")
+  $ws7.TabColor = HexColor "8E44AD"; $ws7.View.ShowGridLines = $false
+  $ec = @(2,32),@(3,24),@(4,11),@(5,6),@(6,6),@(7,6),@(8,10),@(9,18),@(10,12),@(11,16),@(12,16),@(13,50),@(14,30)
+  $ws7.Column(1).Width = 2; foreach ($x in $ec) { $ws7.Column($x[0]).Width = $x[1] }
+  $ws7.Row(1).Height = 8; for ($c=1;$c-le14;$c++){ Set-Fill $ws7.Cells[1,$c] $NAVY }
+  $ws7.Row(2).Height = 32; for ($c=1;$c-le14;$c++){ Set-Fill $ws7.Cells[2,$c] $NAVY }
+  $ws7.Cells["B2:N2"].Merge = $true; $ws7.Cells["B2"].Value = "ENTERPRISE APPS — GRANTED PERMISSIONS (what apps actually hold consent to do)"
+  Set-Font $ws7.Cells["B2"] -size 16 -bold $true -color $WHITE_C
+  $ws7.Cells["B2"].Style.VerticalAlignment = [OfficeOpenXml.Style.ExcelVerticalAlignment]::Center
+  $hr = 4; $ws7.Row($hr).Height = 28
+  $hs = @("App Name","Owner","Risk","High","Med","Low","App Reg?","Type","Enabled","Activity","Category","Granted Permissions","Portal Link")
+  for ($k=0;$k-lt$hs.Count;$k++){ $cell=$ws7.Cells[$hr,($k+2)]; $cell.Value=$hs[$k]; Set-Fill $cell $ACCENT_BLUE; Set-Font $cell -bold $true -color $WHITE_C; $cell.Style.VerticalAlignment=[OfficeOpenXml.Style.ExcelVerticalAlignment]::Center }
+  $dr = $hr + 1
+  foreach ($e in @($entWithPerms | Sort-Object @{E={Get-RiskRank $_.OverallRisk};Descending=$true}, @{E='HighCount';Descending=$true})) {
+    $ws7.Cells[$dr,2].Value=$e.DisplayName
+    $ws7.Cells[$dr,3].Value=$e.Owner
+    $ws7.Cells[$dr,4].Value=$e.OverallRisk; Set-RiskCell $ws7.Cells[$dr,4] $e.OverallRisk
+    $ws7.Cells[$dr,5].Value=$e.HighCount; $ws7.Cells[$dr,6].Value=$e.MedCount; $ws7.Cells[$dr,7].Value=$e.LowCount
+    $ws7.Cells[$dr,8].Value= if ($e.HasAppReg) { 'Yes' } else { 'No' }
+    $ws7.Cells[$dr,9].Value=$e.SPType
+    $enLbl = Get-EnabledLabel $e.SPEnabled
+    $ws7.Cells[$dr,10].Value=$enLbl; Set-EnabledCell $ws7.Cells[$dr,10] $enLbl
+    $ws7.Cells[$dr,11].Value=$e.StaleStatus
+    $aCell=$ws7.Cells[$dr,11]; $aCell.Style.HorizontalAlignment=[OfficeOpenXml.Style.ExcelHorizontalAlignment]::Center
+    switch ($e.StaleStatus) {
+      'Active'     { Set-Fill $aCell $GREEN_BG; Set-Font $aCell -color $GREEN_TEXT }
+      'Stale'      { Set-Fill $aCell $AMBER_BG; Set-Font $aCell -color $AMBER_TEXT }
+      'Never used' { Set-Fill $aCell $RED_BG;   Set-Font $aCell -color $RED_TEXT }
+      default      { Set-Fill $aCell $GRAY_BG;  Set-Font $aCell -color $GRAY_TEXT }
+    }
+    $ws7.Cells[$dr,12].Value=$e.Category
+    $ws7.Cells[$dr,13].Value=$e.SensitivePerms; $ws7.Cells[$dr,13].Style.WrapText=$true; $ws7.Cells[$dr,13].Style.VerticalAlignment=[OfficeOpenXml.Style.ExcelVerticalAlignment]::Top
+    $ws7.Cells[$dr,14].Value="Open in Entra"; $ws7.Cells[$dr,14].Hyperlink=[System.Uri]::new($e.PortalLink)
+    Set-Font $ws7.Cells[$dr,14] -color $ACCENT_BLUE; $ws7.Cells[$dr,14].Style.Font.UnderLine=$true
+    foreach ($col in 5,6,7,8) { $ws7.Cells[$dr,$col].Style.HorizontalAlignment=[OfficeOpenXml.Style.ExcelHorizontalAlignment]::Center }
+    for ($col=2;$col-le14;$col++){ Set-ThinBorder $ws7.Cells[$dr,$col] }
+    if ($dr % 2 -eq 0) { foreach ($col in 2,3,9,12,13) { Set-Fill $ws7.Cells[$dr,$col] $ROW_ALT } }
+    $dr++
+  }
+  if ($dr -gt ($hr + 1)) { $ws7.Cells[$hr, 2, ($dr - 1), 14].AutoFilter = $true }
 }
 
 # ── Sheet: Action Log ──
@@ -1003,19 +1386,39 @@ Write-Host "  Generating interactive HTML report..." -ForegroundColor Cyan
 $htmlPath = Join-Path $reportDir "AppRegistration_Audit_$timestamp.html"
 
 $reportApps = $analysis | Select-Object DisplayName, Owner, OverallRisk, HighCount, MedCount, LowCount,
-  TotalPerms, @{n='Sensitive';e={ $_.SensitivePerms }}, Tenancy, WorkloadIdCand, StaleStatus,
+  TotalPerms, @{n='Sensitive';e={ $_.SensitivePerms }},
+  @{n='Products';e={ @($_.Products) }}, @{n='PermSearch';e={ $_.PermSearch }},
+  Tenancy, WorkloadIdCand, StaleStatus,
+  @{n='Status';e={ if ($_.SPEnabled -eq $true) { 'Enabled' } elseif ($_.SPEnabled -eq $false) { 'Disabled' } else { 'No SP' } }},
   @{n='DaysSince';e={ $_.DaysSinceLastSignIn }},
   @{n='LastSignIn';e={ if ($_.LastSignIn) { ([datetime]$_.LastSignIn).ToString('yyyy-MM-dd') } else { '' } }},
+  @{n='SignInFlow';e={ $_.SignInFlow }},
   TotalCreds, ExpiredCreds, ExpiringCreds, @{n='Portal';e={ $_.PortalLink }}
 
-$reportCreds = $allCreds | Select-Object AppName, CredentialType, Description, StartDate, EndDate,
-  DaysToExpiry, Status, Owner, @{n='Portal';e={ $_.PortalUrl }}
+# Credentials table = app-registration creds + enterprise-app creds, tagged by Source.
+$reportCreds = @($allCreds + $entCreds) | Select-Object AppName, CredentialType, Description, StartDate, EndDate,
+  DaysToExpiry, Status, Owner,
+  @{n='AppState';e={ if ($_.AppId -and $appStateByAppId.ContainsKey($_.AppId)) { $appStateByAppId[$_.AppId] } else { 'No SP' } }},
+  @{n='Source';e={ $_.Source }},
+  @{n='Portal';e={ $_.PortalUrl }}
+
+# Enterprise apps = identities holding actual granted consent (incl. apps with no app registration).
+$reportEntApps = $entAnalysis | Where-Object { $_.OverallRisk -ne 'None' } | Select-Object DisplayName, Owner, OverallRisk, HighCount, MedCount, LowCount,
+  TotalPerms, @{n='Sensitive';e={ $_.SensitivePerms }},
+  @{n='Products';e={ @($_.Products) }}, @{n='PermSearch';e={ $_.PermSearch }},
+  Tenancy, @{n='Category';e={ $_.Category }}, @{n='SPType';e={ $_.SPType }}, @{n='HasAppReg';e={ [bool]$_.HasAppReg }},
+  @{n='Status';e={ if ($_.SPEnabled -eq $true) { 'Enabled' } elseif ($_.SPEnabled -eq $false) { 'Disabled' } else { 'No SP' } }},
+  StaleStatus,
+  @{n='LastSignIn';e={ if ($_.LastSignIn) { ([datetime]$_.LastSignIn).ToString('yyyy-MM-dd') } else { '' } }},
+  @{n='SignInFlow';e={ $_.SignInFlow }},
+  TotalCreds, @{n='Portal';e={ $_.PortalLink }}
 
 $payload = [ordered]@{
-  meta = [ordered]@{ tenant = "$tenantId"; account = "$($ctx.Account)"; generated = (Get-Date -Format 'yyyy-MM-dd HH:mm'); expiry = $WarningDays; stale = $StaleDays; action = "$actionMode" }
-  kpis = [ordered]@{ apps = $analysis.Count; high = $highRiskApps.Count; medium = $medRiskApps.Count; expired = $expiredCreds.Count; expiring = $expiringCreds.Count; stale = $staleApps.Count; never = $neverUsed.Count; caCand = $caCandidates.Count; idpOnly = $idpOnly.Count }
+  meta = [ordered]@{ tenant = "$tenantId"; account = "$($ctx.Account)"; generated = (Get-Date -Format 'yyyy-MM-dd HH:mm'); expiry = $WarningDays; stale = $StaleDays; action = "$actionMode"; scope = "$scopeSummary" }
+  kpis = [ordered]@{ apps = $analysis.Count; high = $highRiskApps.Count; medium = $medRiskApps.Count; expired = $expiredCreds.Count; expiring = $expiringCreds.Count; stale = $staleApps.Count; never = $neverUsed.Count; caCand = $caCandidates.Count; idpOnly = $idpOnly.Count; entApps = $entAnalysis.Count; entHigh = $entHigh.Count; entNoReg = $entNoAppReg.Count }
   apps = @($reportApps)
   creds = @($reportCreds)
+  entApps = @($reportEntApps)
 }
 $json = $payload | ConvertTo-Json -Depth 6 -Compress
 # Harden the JSON embedded in <script>: a maliciously named app registration could
@@ -1096,6 +1499,8 @@ h1 b{color:var(--accent)}
 .search{font-family:var(--mono); font-size:12px; background:var(--panel); border:1px solid var(--line-2); color:var(--ink); padding:9px 13px; border-radius:9px; width:210px; outline:none; transition:border .2s,box-shadow .2s}
 .search:focus{border-color:var(--accent); box-shadow:0 0 0 3px rgba(70,224,208,.12)}
 .search::placeholder{color:var(--dim)}
+.sel{width:auto; max-width:190px; cursor:pointer; appearance:none; -webkit-appearance:none; padding-right:26px; background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%); background-position:calc(100% - 15px) center,calc(100% - 10px) center; background-size:5px 5px,5px 5px; background-repeat:no-repeat}
+.sel option{background:var(--panel); color:var(--ink)}
 .chips{display:flex; gap:5px}
 .chip{font-family:var(--mono); font-size:10.5px; letter-spacing:.06em; text-transform:uppercase; padding:7px 11px; border-radius:20px; border:1px solid var(--line-2); background:none; color:var(--muted); cursor:pointer; transition:.18s}
 .chip:hover{color:var(--ink); border-color:var(--dim)}
@@ -1165,7 +1570,9 @@ a.link:hover{border-bottom-style:solid}
     <div class="tabs" id="tabs"></div>
     <div class="ctrl">
       <div class="chips" id="chips"></div>
-      <input class="search" id="search" placeholder="search app…" autocomplete="off">
+      <select class="search sel" id="state"></select>
+      <select class="search sel" id="product"></select>
+      <input class="search" id="search" placeholder="search apps, perms, products…" autocomplete="off">
     </div>
   </div>
 
@@ -1194,26 +1601,33 @@ function stBadge(v){
   const k = v==='Stale'?'Stale':v==='Never used'?'Never':v==='Active'?'Active':v==='Expired'?'Expired':v==='Expiring Soon'?'Expiring':'other';
   return `<span class="st st-${k}">${E(v)}</span>`;
 }
+function enBadge(v){
+  const k = v==='Enabled'?'Active':v==='Disabled'?'Stale':'other';
+  return `<span class="st st-${k}">${E(v)}</span>`;
+}
 
-let state = {tab:'risk', q:'', risk:'all', sort:{key:null,dir:-1}};
+let state = {tab:'risk', q:'', risk:'all', product:'all', enabled:'all', sort:{key:null,dir:-1}};
+const prods = a => Array.isArray(a.Products) ? a.Products : (a.Products ? [a.Products] : []);
 
 const TABS = [
-  {id:'risk',     label:'Permission Risk', count:()=>D.apps.filter(a=>a.OverallRisk!=='None').length},
-  {id:'workload', label:'Workload ID',     count:()=>D.apps.filter(a=>a.WorkloadIdCand&&(a.WorkloadIdCand.indexOf('CA')===0||a.WorkloadIdCand.indexOf('ID Protection')===0)).length},
-  {id:'creds',    label:'Credentials',     count:()=>D.creds.length},
-  {id:'stale',    label:'Stale & Unused',  count:()=>D.apps.filter(a=>['Stale','Never used','No service principal'].includes(a.StaleStatus)).length},
+  {id:'risk',       label:'App Reg Permissions', count:()=>D.apps.filter(a=>a.OverallRisk!=='None').length},
+  {id:'enterprise', label:'Enterprise Apps',     count:()=>(D.entApps||[]).length},
+  {id:'workload',   label:'Workload ID',         count:()=>D.apps.filter(a=>a.WorkloadIdCand&&(a.WorkloadIdCand.indexOf('CA')===0||a.WorkloadIdCand.indexOf('ID Protection')===0)).length},
+  {id:'creds',      label:'Credentials',         count:()=>D.creds.length},
+  {id:'stale',      label:'Stale & Unused',      count:()=>D.apps.filter(a=>['Stale','Never used','No service principal'].includes(a.StaleStatus)).length},
 ];
 
 // ---- meta + kpis ----
 const m = D.meta;
 document.getElementById('meta').innerHTML =
-  `tenant <span>${E(m.tenant)}</span><br>${E(m.account)}<br>${E(m.generated)} · expiry <span>${m.expiry}d</span> · stale <span>${m.stale}d</span><span class="tag">${E(m.action)}</span>`;
+  `tenant <span>${E(m.tenant)}</span><br>${E(m.account)}<br>${E(m.generated)} · expiry <span>${m.expiry}d</span> · stale <span>${m.stale}d</span><span class="tag">${E(m.action)}</span>${m.scope?`<br>scope: <span>${E(m.scope)}</span>`:''}`;
 document.getElementById('footmeta').textContent = `${m.tenant} · ${m.generated}`;
 
 const K = D.kpis;
 const kpiDefs = [
-  {n:K.apps,   l:'Apps Analyzed', cls:'acc'},
+  {n:K.apps,   l:'App Regs Analyzed', cls:'acc'},
   {n:K.high,   l:'High-Risk Perms', cls:'hi', s:`${K.medium} medium`},
+  {n:K.entApps,l:'Enterprise Apps', cls:K.entHigh?'hi':'acc', s:`${K.entHigh} high-risk · ${K.entNoReg} no app reg`},
   {n:K.expired,l:'Expired Creds', cls:K.expired?'hi':'low', s:`${K.expiring} expiring`},
   {n:K.stale,  l:'Stale Apps', cls:'med', s:`${K.never} never used`},
   {n:K.caCand, l:'CA-Protectable', cls:'low', s:`${K.idpOnly} ID-Protection only`},
@@ -1231,12 +1645,18 @@ document.getElementById('tabs').innerHTML = TABS.map(t=>
   `<button class="tab ${t.id===state.tab?'on':''}" data-t="${t.id}">${t.label}<span class="c">${t.count()}</span></button>`).join('');
 document.getElementById('chips').innerHTML = ['all','High','Medium','Low'].map(r=>
   `<button class="chip ${r===state.risk?'on':''}" data-r="${r}">${r==='all'?'all':r}</button>`).join('');
+const PRODUCTS = [...new Set(D.apps.flatMap(prods))].filter(Boolean).sort((a,b)=>a.toLowerCase()<b.toLowerCase()?-1:1);
+document.getElementById('product').innerHTML =
+  `<option value="all">all products</option>` + PRODUCTS.map(p=>`<option value="${E(p)}">${E(p)}</option>`).join('');
+document.getElementById('state').innerHTML =
+  `<option value="all">all states</option>` + ['Enabled','Disabled','No SP'].map(s=>`<option value="${s}">${s}</option>`).join('');
 
 document.getElementById('tabs').addEventListener('click',e=>{
   const b=e.target.closest('.tab'); if(!b)return;
   state.tab=b.dataset.t; state.sort={key:null,dir:-1};
   document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on',x.dataset.t===state.tab));
   document.getElementById('chips').style.visibility = (state.tab==='creds'||state.tab==='stale')?'hidden':'visible';
+  document.getElementById('product').style.display = (state.tab==='creds')?'none':'';
   render();
 });
 document.getElementById('chips').addEventListener('click',e=>{
@@ -1245,6 +1665,8 @@ document.getElementById('chips').addEventListener('click',e=>{
   document.querySelectorAll('.chip').forEach(x=>x.classList.toggle('on',x.dataset.r===state.risk));
   render();
 });
+document.getElementById('product').addEventListener('change',e=>{state.product=e.target.value; render();});
+document.getElementById('state').addEventListener('change',e=>{state.enabled=e.target.value; render();});
 document.getElementById('search').addEventListener('input',e=>{state.q=e.target.value.toLowerCase(); render();});
 
 // ---- column defs per tab ----
@@ -1255,6 +1677,7 @@ const COLS = {
     {k:'HighCount',t:'High',num:1},{k:'MedCount',t:'Med',num:1},{k:'LowCount',t:'Low',num:1},
     {k:'WorkloadIdCand',t:'Workload ID',r:a=>wlBadge(a.WorkloadIdCand)},
     {k:'Tenancy',t:'Tenancy',c:'mono'},
+    {k:'Status',t:'Enabled',r:a=>enBadge(a.Status)},
     {k:'Owner',t:'Owner',c:'mono'},
   ],
   workload:[
@@ -1262,24 +1685,42 @@ const COLS = {
     {k:'WorkloadIdCand',t:'Eligibility',r:a=>wlBadge(a.WorkloadIdCand),sk:a=>(a.WorkloadIdCand||'').indexOf('CA')===0?2:(a.WorkloadIdCand||'').indexOf('ID')===0?1:0},
     {k:'OverallRisk',t:'Risk',r:a=>badge(a.OverallRisk),sk:a=>riskRank(a.OverallRisk)},
     {k:'Tenancy',t:'Tenancy',c:'mono'},
-    {k:'StaleStatus',t:'Status',r:a=>stBadge(a.StaleStatus)},
+    {k:'Status',t:'Enabled',r:a=>enBadge(a.Status)},
+    {k:'StaleStatus',t:'Activity',r:a=>stBadge(a.StaleStatus)},
     {k:'LastSignIn',t:'Last Sign-In',c:'mono',r:a=>a.LastSignIn||'<span class="dim">—</span>'},
+    {k:'SignInFlow',t:'Last Flow',c:'mono',r:a=>a.SignInFlow||'<span class="dim">—</span>'},
+    {k:'Owner',t:'Owner',c:'mono'},
+  ],
+  enterprise:[
+    {k:'DisplayName',t:'Application',c:'app'},
+    {k:'OverallRisk',t:'Risk',r:a=>badge(a.OverallRisk),sk:a=>riskRank(a.OverallRisk)},
+    {k:'HighCount',t:'High',num:1},{k:'MedCount',t:'Med',num:1},{k:'LowCount',t:'Low',num:1},
+    {k:'Category',t:'Category',c:'mono'},
+    {k:'HasAppReg',t:'App Reg?',r:a=>a.HasAppReg?'<span class="st st-Active">Yes</span>':'<span class="st st-Never">No</span>',sk:a=>a.HasAppReg?1:0},
+    {k:'SPType',t:'Type',c:'mono'},
+    {k:'Status',t:'Enabled',r:a=>enBadge(a.Status)},
+    {k:'StaleStatus',t:'Activity',r:a=>stBadge(a.StaleStatus)},
+    {k:'SignInFlow',t:'Last Flow',c:'mono',r:a=>a.SignInFlow||'<span class="dim">—</span>'},
     {k:'Owner',t:'Owner',c:'mono'},
   ],
   creds:[
     {k:'AppName',t:'Application',c:'app'},
+    {k:'Source',t:'Source',c:'mono'},
     {k:'CredentialType',t:'Type',c:'mono'},
     {k:'Description',t:'Description',c:'mono'},
     {k:'Status',t:'Status',r:c=>stBadge(c.Status)},
+    {k:'AppState',t:'Enabled',r:c=>enBadge(c.AppState)},
     {k:'EndDate',t:'Expires',c:'mono'},
     {k:'DaysToExpiry',t:'Days',num:1,r:c=>{const d=c.DaysToExpiry; const cl=d<0?'var(--hi)':d<=7?'var(--hi)':d<=14?'var(--med)':'var(--low)'; return `<span style="font-family:var(--mono);color:${cl}">${d<0?Math.abs(d)+'↓':d}</span>`;}},
     {k:'Owner',t:'Owner',c:'mono'},
   ],
   stale:[
     {k:'DisplayName',t:'Application',c:'app'},
-    {k:'StaleStatus',t:'Status',r:a=>stBadge(a.StaleStatus)},
+    {k:'StaleStatus',t:'Activity',r:a=>stBadge(a.StaleStatus)},
+    {k:'Status',t:'Enabled',r:a=>enBadge(a.Status)},
     {k:'DaysSince',t:'Days Since',num:1,r:a=>a.DaysSince==null?'<span class="dim">—</span>':a.DaysSince},
     {k:'LastSignIn',t:'Last Sign-In',c:'mono',r:a=>a.LastSignIn||'<span class="dim">—</span>'},
+    {k:'SignInFlow',t:'Last Flow',c:'mono',r:a=>a.SignInFlow||'<span class="dim">—</span>'},
     {k:'TotalCreds',t:'Creds',num:1},
     {k:'Owner',t:'Owner',c:'mono'},
   ],
@@ -1288,13 +1729,25 @@ const COLS = {
 function rows(){
   let r;
   if(state.tab==='creds') r = D.creds.slice();
+  else if(state.tab==='enterprise') r = (D.entApps||[]).slice();
   else if(state.tab==='stale') r = D.apps.filter(a=>['Stale','Never used','No service principal'].includes(a.StaleStatus));
   else if(state.tab==='workload') r = D.apps.filter(a=>a.WorkloadIdCand&&(a.WorkloadIdCand.indexOf('CA')===0||a.WorkloadIdCand.indexOf('ID Protection')===0));
   else r = D.apps.filter(a=>a.OverallRisk!=='None');
-  // search
-  if(state.q){ const nameKey = state.tab==='creds'?'AppName':'DisplayName'; r=r.filter(x=>(x[nameKey]||'').toLowerCase().includes(state.q)); }
-  // risk filter (risk + workload tabs)
-  if((state.tab==='risk'||state.tab==='workload') && state.risk!=='all') r=r.filter(x=>x.OverallRisk===state.risk);
+  // product filter (app tabs only — creds carry no product)
+  if(state.tab!=='creds' && state.product!=='all') r=r.filter(x=>prods(x).includes(state.product));
+  // enabled/disabled filter (all tabs — creds carry the owning app's state)
+  if(state.enabled!=='all') r=r.filter(x=>(state.tab==='creds'?x.AppState:x.Status)===state.enabled);
+  // search — matches app name plus its details (owner, tenancy, products, permissions)
+  if(state.q){
+    r=r.filter(x=>{
+      const hay = state.tab==='creds'
+        ? [x.AppName,x.Source,x.CredentialType,x.Description,x.Status,x.AppState,x.Owner]
+        : [x.DisplayName,x.Owner,x.Tenancy,x.Category,x.WorkloadIdCand,x.SPType,x.StaleStatus,x.SignInFlow,x.Status,x.Sensitive,x.PermSearch,prods(x).join(' ')];
+      return hay.join(' ').toLowerCase().includes(state.q);
+    });
+  }
+  // risk filter (risk + workload + enterprise tabs)
+  if((state.tab==='risk'||state.tab==='workload'||state.tab==='enterprise') && state.risk!=='all') r=r.filter(x=>x.OverallRisk===state.risk);
   // sort
   const cols=COLS[state.tab];
   if(state.sort.key){
@@ -1304,7 +1757,7 @@ function rows(){
       if(typeof va==='string'){va=va.toLowerCase();vb=(vb||'').toLowerCase(); return va<vb?-state.sort.dir:va>vb?state.sort.dir:0;}
       return ((va||0)-(vb||0))*state.sort.dir;
     });
-  } else if(state.tab==='risk'||state.tab==='workload'){
+  } else if(state.tab==='risk'||state.tab==='workload'||state.tab==='enterprise'){
     r.sort((a,b)=>riskRank(b.OverallRisk)-riskRank(a.OverallRisk)||b.HighCount-a.HighCount);
   } else if(state.tab==='creds'){ r.sort((a,b)=>a.DaysToExpiry-b.DaysToExpiry); }
   else { r.sort((a,b)=>(b.DaysSince||0)-(a.DaysSince||0)); }
@@ -1313,7 +1766,7 @@ function rows(){
 
 function render(){
   const cols=COLS[state.tab], data=rows();
-  const expandable = state.tab==='risk'||state.tab==='workload';
+  const expandable = state.tab==='risk'||state.tab==='workload'||state.tab==='enterprise';
   let h=`<table><thead><tr>`;
   cols.forEach(c=>{ const on=state.sort.key===c.k; h+=`<th class="${c.num?'num':''} ${on?'sorted':''}" data-k="${c.k}">${c.t}<span class="ar">${on?(state.sort.dir>0?'▲':'▼'):'⇅'}</span></th>`; });
   h+=`<th></th></tr></thead><tbody>`;
@@ -1361,9 +1814,9 @@ Write-Host ""
 Write-Host "  ============================================================" -ForegroundColor Cyan
 Write-Host "  Excel report: $exportPath" -ForegroundColor Green
 Write-Host "  HTML report:  $htmlPath" -ForegroundColor Green
-Write-Host "  Apps analyzed:        $($analysis.Count)" -ForegroundColor White
-Write-Host "  HIGH-risk perms:      $($highRiskApps.Count)" -ForegroundColor White
-Write-Host "  Expired credentials:  $($expiredCreds.Count)" -ForegroundColor White
+Write-Host "  App registrations:    $($analysis.Count)  (HIGH-risk perms: $($highRiskApps.Count))" -ForegroundColor White
+Write-Host "  Enterprise apps:      $($entAnalysis.Count)  (HIGH-risk grants: $($entHigh.Count), no app reg: $($entNoAppReg.Count))" -ForegroundColor White
+Write-Host "  Expired credentials:  $($expiredCreds.Count) app reg + $($entExpired.Count) enterprise" -ForegroundColor White
 Write-Host "  Stale / never used:   $($staleApps.Count) / $($neverUsed.Count)" -ForegroundColor White
 if ($actionResults.Count -gt 0) {
   $ok = @($actionResults | Where-Object { $_.Result -eq 'Success' }).Count

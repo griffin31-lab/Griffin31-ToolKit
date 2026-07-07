@@ -1,6 +1,6 @@
 # Entra-AppRegistration-Audit
 
-> **One scan for every app registration** — API permission risk (High/Med/Low), credential expiry, staleness, and owners — in a single Excel report with gated cleanup actions.
+> **One scan for every app registration _and_ enterprise app** — API permission risk (High/Med/Low), credential expiry, staleness, enabled/disabled state, and owners — in a single Excel + interactive HTML report with gated cleanup actions.
 
 <sub>[← Back to Griffin31 ToolKit](../) · Cross-platform (Windows · macOS · Linux) · PowerShell 7</sub>
 
@@ -8,9 +8,11 @@
 
 ## What you get
 
+- **App registrations _and_ enterprise apps** — app registrations are audited by the permissions they **request**; enterprise apps (service principals) are audited by the permissions they **actually hold consent to** — including third-party / SaaS / gallery apps that have **no app registration** in your tenant, plus their delegated grants and app-role assignments.
 - **Permission risk per app** — every API permission classified **High / Medium / Low by what it can actually do**, not by how many it has. App's overall risk = its single highest-risk permission.
-- **Credential health** — expired and expiring certs/secrets (red ≤7 days, amber ≤14)
-- **Staleness** — last sign-in activity → Active / Stale / Never used / No service principal
+- **Credential health** — expired and expiring certs/secrets (red ≤7 days, amber ≤14), for both app registrations and enterprise apps (SAML signing certs, secrets)
+- **Staleness** — last sign-in across **all flows** (user-delegated *and* app-only / daemon, as client or resource) → Active / Stale / Never used. A **Last Flow** column shows which type it last used. Managed identities show **N/A (not tracked)** — their token use largely isn't captured by this report, so they're never falsely flagged "Never used".
+- **Enabled / disabled state** — each app's enterprise-app (service principal) `accountEnabled` state, shown on every table and **filterable** (Excel AutoFilter + HTML dropdown)
 - **Owners resolved** + tenant-owned vs external
 - **Workload identity protection candidates** — flags which apps you can target with Conditional Access for workload identities (single-tenant only) vs ID Protection only (multi-tenant), per Microsoft's eligibility rules
 - **KPI dashboard** and **direct Entra portal links** on every row
@@ -22,7 +24,17 @@
 pwsh ./entra-appregistration-audit.ps1
 ```
 
-Prompts for: admin UPN, expiry threshold (30/60/90/custom), stale threshold (90 default), include Microsoft first-party apps (excluded by default).
+Prompts for: admin UPN, expiry threshold (30/60/90/custom), stale threshold (90 default). After connecting, it shows **live counts per object type** and lets you multi-select what to audit:
+
+| # | Type | Where it lives in Entra |
+| --- | --- | --- |
+| 1 | **App registrations** | Entra > **App registrations** (apps built in your tenant) |
+| 2 | **Enterprise apps — your org** | Entra > **Enterprise applications** (single-tenant apps your org created) |
+| 3 | **Enterprise apps — third-party** | External apps users consented to (**top consent-phishing risk**) |
+| 4 | **Enterprise apps — Microsoft** | Microsoft first-party apps (usually noise; slower — a Graph call each) |
+| 5 | **Managed identities** | Azure managed identities |
+
+Enter comma-separated choices (e.g. `1,3`). Default `1,2,3`.
 
 ## Why this tool?
 
@@ -65,30 +77,38 @@ The flag appears as a column on the **Permission Risk** sheet and as a count on 
 
 ## How it works
 
-1. **Setup** — admin UPN, expiry + stale thresholds, first-party include/exclude
+1. **Setup** — admin UPN, expiry + stale thresholds
 2. **Connect** — Microsoft Graph sign-in via browser
-3. **Fetch** — app registrations, service principals, `servicePrincipalSignInActivities`
-4. **Resolve permissions** — pull each resource API's roles/scopes to turn GUIDs into names
-5. **Analyze** — risk per permission, credential buckets, staleness, owners
-6. **Review & decide** — export only / remove expired creds / disable SP / delete app
-7. **Export** — Excel with portal hyperlinks
+3. **Fetch** — app registrations, service principals, `servicePrincipalSignInActivities`, `oauth2PermissionGrants` (delegated consent)
+4. **Scope** — pick object types to audit, with live counts per type (app regs / enterprise apps by owner / managed identities)
+5. **Resolve permissions** — pull each resource API's roles/scopes to turn GUIDs into names
+6. **Analyze app registrations** — risk per requested permission, credential buckets, staleness
+7. **Analyze enterprise apps** — actual granted permissions (delegated grants + per-SP app-role assignments), SP credentials, enabled state, staleness
+8. **Resolve owners**
+9. **Review & decide** — export only / remove expired creds / disable SP / delete app
+10. **Export** — Excel + interactive HTML, with portal hyperlinks
 
 ## Output
 
-`AppRegistration_Audit_<timestamp>.xlsx` on your Desktop:
+`AppRegistration_Audit_<timestamp>.xlsx` **and** `AppRegistration_Audit_<timestamp>.html` on your Desktop:
 
 - **Summary** — KPI dashboard + permission-risk breakdown
-- **Permission Risk** — every app with permissions: overall risk, High/Med/Low counts, sensitive permission list, owner, link
-- **Expired Creds** / **Expiring Creds** — color-coded by urgency
+- **Permission Risk** — every app registration with permissions: overall risk, High/Med/Low counts, **Enabled** state, sensitive permission list, owner, link
+- **Enterprise Apps** — enterprise apps with granted permissions: overall risk, High/Med/Low counts, **App Reg?** (has a local registration or not), type, **Enabled** state, tenancy, granted permission list
+- **Expired Creds** / **Expiring Creds** — color-coded by urgency, with a **Source** column (app reg vs enterprise) and **Enabled** state
 - **Stale & Unused** — stale / never-used / orphaned apps with last sign-in
 - **Action Log** — appears only when an action runs
+
+Every data sheet has **AutoFilter** on, so you can filter by Enabled/Disabled, risk, source, etc. directly. The HTML report is a self-contained interactive view (tabs, search, risk chips, product + enabled/disabled dropdowns).
+
+> **Note:** cleanup actions (remove creds / disable / delete) still operate on **app registrations** only — the enterprise-app view is audit-only.
 
 ## Safety
 
 - **Audit-only by default.**
 - **Remove / disable** require typing `YES`. **Delete** requires `YES` then `DELETE`.
 - **Disable before delete** — set `accountEnabled=false`, wait, then delete if nothing broke.
-- **Microsoft first-party apps excluded by default.**
+- **Scope is opt-in** — default audits app registrations + your-org and third-party enterprise apps; Microsoft apps and managed identities are only scanned if you pick them.
 
 ## Related tools
 
