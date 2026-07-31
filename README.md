@@ -71,7 +71,7 @@ Every tool follows the same principles — **one problem, one tool**; **safe by 
 | If you want to… | Use | Output |
 |---|---|---|
 | Audit your Conditional Access policies + posture score | [CA-Policy-Analyzer](CA-Policy-Analyzer/) ★ | HTML report |
-| Keep break-glass accounts excluded from every CA policy, always | [CA-BreakGlass-Enforcer](CA-BreakGlass-Enforcer/) | Azure Logic App |
+| Keep break-glass accounts excluded from every CA policy, always | [CA-BreakGlass-Enforcer](https://github.com/OnCloud-PS/CA-BreakGlass-Enforcer-v2) | Azure Logic App |
 | Prepare for the May 2026 CA enforcement change | [CA-Update-AffectedApps](CA-Update-AffectedApps/) | Excel risk report |
 | Find sites, OneDrives, Teams with public sharing or missing labels | [SharePoint-Sites-Audit](SharePoint-Sites-Audit/) ★ | HTML report |
 | Hunt OAuth abuse, infostealers, or token theft in M365 | [Threat-Hunting](Threat-Hunting/) | KQL / IoCs / detection rules |
@@ -97,7 +97,7 @@ Exports your full CA configuration, scores every policy 0-100, flags tenant-wide
 Identifies tenant apps using basic OIDC scopes, cross-references sign-in logs for MFA status, and generates an Excel risk report so you can remediate before the change breaks authentication.
 <sub>`Conditional Access` · `App Assessment` · `MFA`</sub>
 
-**[CA-BreakGlass-Enforcer](CA-BreakGlass-Enforcer/)** &nbsp;·&nbsp; *Keep emergency accounts out of every CA policy, always*
+**[CA-BreakGlass-Enforcer](https://github.com/OnCloud-PS/CA-BreakGlass-Enforcer-v2)** &nbsp;·&nbsp; *Keep emergency accounts out of every CA policy, always*
 Azure Consumption Logic App that runs every 30 minutes, iterates every Conditional Access policy, and idempotently adds two break-glass account IDs to the `excludeUsers` list. Managed Service Identity auth (no stored credentials), least-privilege Graph scope, If-Match PATCH to avoid overwriting concurrent admin edits.
 <sub>`Conditional Access` · `Break-Glass` · `Azure Logic Apps` · `MSI`</sub>
 
